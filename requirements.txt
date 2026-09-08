@@ -1,0 +1,4 @@
+# crawl.py, gguf_header.py and bench.py are stdlib only.
+# fit.py and build_index.py:
+numpy>=1.24
+# bench.py uses torch for the bandwidth test only if it is importable (RunPod pytorch template has it).

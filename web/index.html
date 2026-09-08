@@ -1,0 +1,101 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>MODELINDEX — Ollama models by GPU</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:ital,wght@0,400;0,500;0,600;1,400&family=Instrument+Serif:ital@0;1&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="styles.css">
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.7/dist/chart.umd.min.js"></script>
+</head>
+<body>
+  <header class="top">
+    <a class="brand" href="./">
+      <span class="brand-mark" aria-hidden="true"></span>
+      MODELINDEX
+    </a>
+    <label class="search">
+      <span class="vh">Search models</span>
+      <input id="q" type="search" placeholder="Search models, e.g. llama, 8b, qwen" autocomplete="off">
+    </label>
+  </header>
+
+  <main>
+    <section class="hero">
+      <h1>Ollama model index by GPU</h1>
+      <p>
+        Rank library tags for a GPU and context length.
+        Layout follows the
+        <a href="https://openrouter.ai/models">OpenRouter</a> picker and
+        <a href="https://artificialanalysis.ai/leaderboards/models">Artificial Analysis</a> leaderboard;
+        metrics are local: VRAM, speed (decode tok/s), latency (TTFT), quant, and fit (full / partial / OOM).
+      </p>
+    </section>
+
+    <section class="rig" aria-label="GPU and context">
+      <label class="field">
+        <span>GPU</span>
+        <select id="gpu"></select>
+      </label>
+      <label class="field">
+        <span>Context</span>
+        <select id="ctx"></select>
+      </label>
+      <p class="rig-spec" id="rig-spec"></p>
+    </section>
+
+    <section class="insights" id="insights" aria-label="Leader summaries"></section>
+
+    <section class="board">
+      <div class="board-head">
+        <div class="tabs" id="tabs" role="tablist"></div>
+        <div class="view-toggle" role="tablist" aria-label="Layout">
+          <button type="button" class="view-btn" id="view-list" data-view="list" aria-selected="true">List</button>
+          <button type="button" class="view-btn" id="view-table" data-view="table" aria-selected="false">Table</button>
+        </div>
+      </div>
+      <p class="blurb" id="blurb"></p>
+      <div class="chart-wrap" id="chart-wrap" hidden>
+        <canvas id="rank-chart" height="280"></canvas>
+      </div>
+      <div class="toolbar">
+        <div class="filters" id="filters"></div>
+      </div>
+      <div class="list" id="list"></div>
+      <div class="table-wrap" id="table-wrap" hidden>
+        <table id="grid">
+          <thead></thead>
+          <tbody></tbody>
+        </table>
+      </div>
+      <p class="count" id="count"></p>
+    </section>
+  </main>
+
+  <footer class="foot">
+    <dl class="glossary">
+      <div>
+        <dt>Speed</dt>
+        <dd>Decode tokens/s after the prompt is ingested. Artificial Analysis output speed.</dd>
+      </div>
+      <div>
+        <dt>Latency</dt>
+        <dd>TTFT @ 128 tok = 128/prefill + 1/decode. Ollama prompt_eval_duration plus one decode step.</dd>
+      </div>
+      <div>
+        <dt>VRAM</dt>
+        <dd>Weights + KV cache at the selected context. Fit is full, partial offload, or OOM.</dd>
+      </div>
+      <div>
+        <dt>Quant</dt>
+        <dd>GGUF file type. Q4_K_M is Ollama’s usual default; Q8_0 and F16 are higher precision.</dd>
+      </div>
+    </dl>
+    <p id="foot-note"></p>
+  </footer>
+
+  <script src="app.js"></script>
+</body>
+</html>

@@ -1,0 +1,40 @@
+id,name,vendor,type,generation,memory_gb,usable_fraction,bandwidth_gbs,fp16_tflops,notes
+rtx3060-6-laptop,NVIDIA GeForce RTX 3060 Laptop GPU,nvidia,discrete,ampere,6,0.92,336,37,"local calibration machine"
+rtx3060-12,NVIDIA GeForce RTX 3060,nvidia,discrete,ampere,12,0.92,360,51,
+rtx3090,NVIDIA GeForce RTX 3090,nvidia,discrete,ampere,24,0.92,936,142,"runpod"
+rtx4060-8,NVIDIA GeForce RTX 4060,nvidia,discrete,ada,8,0.92,272,60,
+rtx4060ti-16,NVIDIA GeForce RTX 4060 Ti,nvidia,discrete,ada,16,0.92,288,88,
+rtx4070-12,NVIDIA GeForce RTX 4070,nvidia,discrete,ada,12,0.92,504,58,
+rtx4070tis-16,NVIDIA GeForce RTX 4070 Ti SUPER,nvidia,discrete,ada,16,0.92,672,88,
+rtx4080-16,NVIDIA GeForce RTX 4080,nvidia,discrete,ada,16,0.92,717,97,
+rtx4090,NVIDIA GeForce RTX 4090,nvidia,discrete,ada,24,0.92,1008,165,"runpod P0 anchor"
+rtx5070-12,NVIDIA GeForce RTX 5070,nvidia,discrete,blackwell,12,0.92,672,62,
+rtx5080-16,NVIDIA GeForce RTX 5080,nvidia,discrete,blackwell,16,0.92,960,112,
+rtx5090,NVIDIA GeForce RTX 5090,nvidia,discrete,blackwell,32,0.92,1792,209,"runpod"
+rtxa5000,NVIDIA RTX A5000,nvidia,discrete,ampere,24,0.92,768,111,"runpod"
+rtxa6000,NVIDIA RTX A6000,nvidia,discrete,ampere,48,0.92,768,155,"runpod"
+a40,NVIDIA A40,nvidia,discrete,ampere,48,0.92,696,150,"runpod"
+l4,NVIDIA L4,nvidia,discrete,ada,24,0.92,300,121,"runpod"
+l40s,NVIDIA L40S,nvidia,discrete,ada,48,0.92,864,362,"runpod"
+rtx6000ada,NVIDIA RTX 6000 Ada Generation,nvidia,discrete,ada,48,0.92,960,364,"runpod"
+a100-80-pcie,NVIDIA A100 80GB PCIe,nvidia,discrete,ampere,80,0.94,1935,312,"runpod; HBM2e"
+a100-80-sxm,NVIDIA A100-SXM4-80GB,nvidia,discrete,ampere,80,0.94,2039,312,"HBM2e"
+h100-80-pcie,NVIDIA H100 PCIe,nvidia,discrete,hopper,80,0.94,2000,756,"runpod; HBM2e"
+h100-80-sxm,NVIDIA H100 80GB HBM3,nvidia,discrete,hopper,80,0.94,3350,989,
+rx7900xtx,AMD Radeon RX 7900 XTX,amd,discrete,rdna3,24,0.92,960,123,
+m1,Apple M1,apple,unified,m1,16,0.75,68,5,"unified memory; usable = 75% of system RAM"
+m1-pro,Apple M1 Pro,apple,unified,m1,32,0.75,200,10,
+m1-max,Apple M1 Max,apple,unified,m1,64,0.75,400,21,
+m2,Apple M2,apple,unified,m2,24,0.75,100,7,
+m2-pro,Apple M2 Pro,apple,unified,m2,32,0.75,200,13,
+m2-max,Apple M2 Max,apple,unified,m2,96,0.75,400,27,
+m2-ultra,Apple M2 Ultra,apple,unified,m2,192,0.75,800,54,
+m3,Apple M3,apple,unified,m3,24,0.75,100,8,
+m3-pro,Apple M3 Pro,apple,unified,m3,36,0.75,150,14,
+m3-max,Apple M3 Max,apple,unified,m3,128,0.75,400,28,
+m3-ultra,Apple M3 Ultra,apple,unified,m3,512,0.75,819,57,
+m4,Apple M4,apple,unified,m4,32,0.75,120,9,
+m4-pro,Apple M4 Pro,apple,unified,m4,64,0.75,273,17,
+m4-max,Apple M4 Max,apple,unified,m4,128,0.75,546,34,
+cpu-ddr4-dual,CPU only DDR4-3200 dual channel,cpu,cpu,cpu,64,0.80,51,1,"tokens/s bound by RAM bandwidth"
+cpu-ddr5-dual,CPU only DDR5-5600 dual channel,cpu,cpu,cpu,64,0.80,90,2,
