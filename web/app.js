@@ -1,712 +1,885 @@
-const QUANT_FACTOR = {
-  F16: 1, Q8_0: 0.97, Q4_K_M: 0.92, Q4_0: 0.86,
-  Q3_K_L: 0.78, Q3_K_M: 0.74, Q3_K_S: 0.68, Q2_K: 0.55,
+const GB = 1e9;
+const PAGE_FIND = 18;
+const PAGE_EXPLORE = 40;
+
+const QUANT_QUALITY = {
+  F32: 1, F16: 0.99, BF16: 0.99, Q8_0: 0.96, Q6_K: 0.92,
+  Q5_K_M: 0.88, Q5_K_S: 0.86, Q5_1: 0.85, Q5_0: 0.84,
+  Q4_K_M: 0.8, Q4_K_S: 0.77, Q4_1: 0.75, Q4_0: 0.73,
+  Q3_K_L: 0.66, Q3_K_M: 0.62, Q3_K_S: 0.57, Q2_K: 0.46,
 };
 
-const METRICS = [
-  { id: "pick", label: "Recommended" },
-  { id: "speed", label: "Speed" },
-  { id: "latency", label: "Latency" },
-  { id: "vram", label: "VRAM" },
-  { id: "maxctx", label: "Max context" },
-];
-
-const SIZE_FILTERS = [
-  { id: "all", label: "Size: all", test: () => true },
-  { id: "lt3", label: "< 3B", test: (m) => m.params < 3e9 },
-  { id: "3to8", label: "3–8B", test: (m) => m.params >= 3e9 && m.params < 8e9 },
-  { id: "8to32", label: "8–32B", test: (m) => m.params >= 8e9 && m.params < 32e9 },
-  { id: "gt32", label: "32B+", test: (m) => m.params >= 32e9 },
-];
-
-const KIND_FILTERS = [
-  { id: "all", label: "Arch: all", test: () => true },
-  { id: "dense", label: "Dense", test: (m) => !m.experts },
-  { id: "moe", label: "MoE", test: (m) => m.experts > 0 },
-];
-
-const FIT_FILTERS = [
-  { id: "runnable", label: "Runnable", test: (r) => r.fit === "full" || r.fit === "partial" },
-  { id: "full", label: "Full GPU", test: (r) => r.fit === "full" },
-  { id: "partial", label: "Partial offload", test: (r) => r.fit === "partial" },
-  { id: "none", label: "OOM", test: (r) => r.fit === "none" },
-  { id: "all", label: "All", test: () => true },
-];
-
-const GPU_GROUPS = [
-  ["GeForce / RTX", (g) => g.vendor === "nvidia" && g.id.startsWith("rtx") && !g.id.startsWith("rtxa") && g.id !== "rtx6000ada"],
-  ["Datacenter / workstation", (g) => g.vendor === "nvidia" && !(g.id.startsWith("rtx") && !g.id.startsWith("rtxa") && g.id !== "rtx6000ada")],
-  ["AMD", (g) => g.vendor === "amd"],
-  ["Apple", (g) => g.vendor === "apple"],
-  ["CPU only", (g) => g.vendor === "cpu"],
-];
+const USECASES = {
+  chat: { label: "chat and writing" },
+  code: { label: "coding" },
+  long: { label: "long documents" },
+  vision: { label: "vision" },
+  embedding: { label: "embeddings" },
+};
 
 const state = {
-  gpu: "rtx4090",
-  ctx: 4096,
-  metric: "pick",
+  mode: "find",
+  gpu: "l4",
+  ram: 32,
+  ctx: 8192,
+  usecase: "chat",
+  priority: "balanced",
+  allowPartial: false,
   q: "",
-  family: "all",
-  quant: "all",
-  size: "all",
-  kind: "all",
-  fit: "runnable",
-  unique: true,
-  view: "list",
-  sortKey: "pick",
-  sortDir: "desc",
+  fitFilter: "runnable",
+  archFilter: "all",
+  quantFilter: "all",
+  sort: "recommended",
+  sizes: [],
+  sizeMenuOpen: false,
+  visible: PAGE_FIND,
   open: null,
 };
 
-let DATA = null;
-let chart = null;
+const SIZE_CLASSES = [
+  { id: "micro", name: "Micro", hint: "<300M params", max: 3e8 },
+  { id: "tiny", name: "Tiny", hint: "300M–1B params", max: 1e9 },
+  { id: "small", name: "Small", hint: "1B–3B params", max: 3e9 },
+  { id: "compact", name: "Compact", hint: "3B–7B params", max: 7e9 },
+  { id: "medium", name: "Medium", hint: "7B–14B params", max: 14e9 },
+  { id: "large", name: "Large", hint: "14B–32B params", max: 32e9 },
+  { id: "xl", name: "XL", hint: "32B–70B params", max: 70e9 },
+  { id: "xxl", name: "XXL", hint: "70B–120B params", max: 120e9 },
+  { id: "huge", name: "Huge", hint: "120B–400B params", max: 400e9 },
+  { id: "frontier", name: "Frontier", hint: ">400B params", max: Infinity },
+  { id: "unknown", name: "Unknown", hint: "missing parameter count" },
+];
+let presentSizeIds = [];
+
+function availableSizeClasses() {
+  return SIZE_CLASSES.filter((cls) => presentSizeIds.includes(cls.id));
+}
+
+function defaultSizes() {
+  return availableSizeClasses().filter((cls) => cls.id !== "unknown").map((cls) => cls.id);
+}
+
+function collectPresentSizes() {
+  const seen = new Set(catalog.models.map((m) => sizeClassId(m.params)));
+  presentSizeIds = SIZE_CLASSES.map((cls) => cls.id).filter((id) => seen.has(id));
+}
+
+let manifest;
+let hardware;
+let catalog;
 
 const $ = (id) => document.getElementById(id);
-const esc = (s) => String(s)
+const esc = (value) => String(value ?? "")
   .replaceAll("&", "&amp;")
   .replaceAll("<", "&lt;")
   .replaceAll(">", "&gt;")
   .replaceAll('"', "&quot;");
 
+function safeUrl(url) {
+  const trimmed = String(url || "").trim().replace(/&amp;/g, "&");
+  if (/^https?:\/\//i.test(trimmed)) return trimmed;
+  if (trimmed.startsWith("/assets/") || trimmed.startsWith("/library/")) return `https://ollama.com${trimmed}`;
+  return "";
+}
+
+function inlineMd(text) {
+  let out = text;
+  out = out.replace(/`([^`]+)`/g, (_, code) => `<code>${code}</code>`);
+  out = out.replace(/!\[([^\]]*)\]\(([^)]+)\)/g, (_, alt, url) => {
+    const href = safeUrl(url);
+    return href ? `<img src="${esc(href)}" alt="${alt}" loading="lazy">` : "";
+  });
+  out = out.replace(/\[([^\]]+)\]\(([^)]+)\)/g, (_, label, url) => {
+    const href = safeUrl(url);
+    return href ? `<a href="${esc(href)}" target="_blank" rel="noopener noreferrer">${label}</a>` : label;
+  });
+  out = out.replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>");
+  out = out.replace(/__([^_]+)__/g, "<strong>$1</strong>");
+  out = out.replace(/(^|[^*])\*([^*\n]+)\*(?!\*)/g, "$1<em>$2</em>");
+  return out;
+}
+
+function splitTableRow(line) {
+  let s = line.trim();
+  if (s.startsWith("|")) s = s.slice(1);
+  if (s.endsWith("|")) s = s.slice(0, -1);
+  return s.split("|").map((cell) => cell.trim().replace(/\u000b/g, " "));
+}
+
+function isTableSep(cells) {
+  return cells.length > 0 && cells.every((cell) => /^:?-{1,}:?$/.test(cell.replace(/\s/g, "")));
+}
+
+function isTableLine(line) {
+  const trimmed = line.trim();
+  return trimmed.startsWith("|") && trimmed.includes("|", 1);
+}
+
+function tableCellHtml(cell) {
+  return inlineMd(cell.replace(/&lt;br\s*\/?&gt;/gi, "<br>"));
+}
+
+function renderTable(tableLines) {
+  const rows = tableLines.map(splitTableRow);
+  if (!rows.length) return "";
+  let head = rows[0];
+  let start = 1;
+  if (rows[1] && isTableSep(rows[1])) start = 2;
+  const body = rows.slice(start).filter((row) => !isTableSep(row) && row.some((cell) => cell));
+  const cols = Math.max(head.length, ...body.map((row) => row.length), 1);
+  const pad = (row) => {
+    const next = row.slice(0, cols);
+    while (next.length < cols) next.push("");
+    return next;
+  };
+  head = pad(head);
+  const thead = `<thead><tr>${head.map((cell) => `<th>${tableCellHtml(cell)}</th>`).join("")}</tr></thead>`;
+  const tbody = `<tbody>${body.map((row) =>
+    `<tr>${pad(row).map((cell) => `<td>${tableCellHtml(cell)}</td>`).join("")}</tr>`
+  ).join("")}</tbody>`;
+  return `<div class="md-table"><table>${thead}${tbody}</table></div>`;
+}
+
+function mdToHtml(src) {
+  const slots = [];
+  const keep = (html) => {
+    slots.push(html);
+    return `\0${slots.length - 1}\0`;
+  };
+  let text = String(src || "").replace(/\r\n/g, "\n");
+  text = text.replace(/```[^\n]*\n?([\s\S]*?)```/g, (_, code) =>
+    keep(`<pre><code>${esc(code.replace(/\n$/, ""))}</code></pre>`));
+  text = text.replace(/<img\b([^>]*)\/?>/gi, (_, attrs) => {
+    const srcMatch = /src=["']([^"']+)["']/i.exec(attrs);
+    const altMatch = /alt=["']([^"']*)["']/i.exec(attrs);
+    const href = srcMatch ? safeUrl(srcMatch[1]) : "";
+    if (!href) return "";
+    return keep(`<img src="${esc(href)}" alt="${esc(altMatch ? altMatch[1] : "")}" loading="lazy">`);
+  });
+  text = esc(text);
+  const lines = text.split("\n");
+  const out = [];
+  let para = [];
+  let list = null;
+  const flushPara = () => {
+    if (!para.length) return;
+    out.push(`<p>${inlineMd(para.join("\n")).replace(/\n/g, "<br>")}</p>`);
+    para = [];
+  };
+  const flushList = () => {
+    if (!list) return;
+    out.push(`<${list.tag}>${list.items.map((item) => `<li>${inlineMd(item)}</li>`).join("")}</${list.tag}>`);
+    list = null;
+  };
+  for (let i = 0; i < lines.length; i += 1) {
+    const line = lines[i];
+    if (isTableLine(line)) {
+      flushPara();
+      flushList();
+      const tableLines = [];
+      while (i < lines.length && isTableLine(lines[i])) {
+        tableLines.push(lines[i]);
+        i += 1;
+      }
+      i -= 1;
+      out.push(renderTable(tableLines));
+      continue;
+    }
+    if (line.includes("\0")) {
+      flushPara();
+      flushList();
+      out.push(line);
+      continue;
+    }
+    const heading = /^(#{1,4})\s+(.+)$/.exec(line);
+    if (heading) {
+      flushPara();
+      flushList();
+      const level = heading[1].length;
+      out.push(`<h${level}>${inlineMd(heading[2])}</h${level}>`);
+      continue;
+    }
+    if (/^[-*]{3,}$/.test(line.trim())) {
+      flushPara();
+      flushList();
+      out.push("<hr>");
+      continue;
+    }
+    const quote = /^&gt;\s?(.*)$/.exec(line);
+    if (quote) {
+      flushPara();
+      flushList();
+      out.push(`<blockquote>${inlineMd(quote[1])}</blockquote>`);
+      continue;
+    }
+    const ul = /^[-*]\s+(.+)$/.exec(line);
+    if (ul) {
+      flushPara();
+      if (!list || list.tag !== "ul") {
+        flushList();
+        list = { tag: "ul", items: [] };
+      }
+      list.items.push(ul[1]);
+      continue;
+    }
+    const ol = /^\d+\.\s+(.+)$/.exec(line);
+    if (ol) {
+      flushPara();
+      if (!list || list.tag !== "ol") {
+        flushList();
+        list = { tag: "ol", items: [] };
+      }
+      list.items.push(ol[1]);
+      continue;
+    }
+    if (!line.trim()) {
+      flushPara();
+      flushList();
+      continue;
+    }
+    flushList();
+    para.push(line);
+  }
+  flushPara();
+  flushList();
+  return out.join("").replace(/\0(\d+)\0/g, (_, i) => slots[Number(i)] || "");
+}
+
+function fmtPushed(iso) {
+  if (!iso) return "—";
+  const date = new Date(iso);
+  if (Number.isNaN(date.getTime())) return "—";
+  return date.toLocaleDateString(undefined, { year: "numeric", month: "short", day: "numeric" });
+}
+
+function paramHeadline(row) {
+  if (row.ple_bytes && row.params > (row.active_params || 0) * 1.1) {
+    return `${fmtParams(row.active_params)} effective · ${fmtParams(row.params)} with embeddings`;
+  }
+  return `${fmtParams(row.params)} parameters`;
+}
+
 function fmtParams(n) {
-  if (n >= 1e12) return `${(n / 1e12).toFixed(n >= 1e13 ? 0 : 2)}T`;
+  if (!n) return "—";
+  if (n >= 1e12) return `${(n / 1e12).toFixed(n >= 10e12 ? 0 : 1)}T`;
   if (n >= 1e9) {
-    const v = n / 1e9;
-    if (v >= 10) return `${v.toFixed(0)}B`;
-    if (Math.abs(v - Math.round(v)) < 0.05) return `${Math.round(v)}B`;
-    return `${v.toFixed(1)}B`;
+    const value = n / 1e9;
+    return `${value >= 10 ? value.toFixed(0) : value.toFixed(1).replace(".0", "")}B`;
   }
   return `${(n / 1e6).toFixed(0)}M`;
 }
-function fmtCtx(n) {
-  if (!n) return "—";
-  if (n >= 1024 && n % 1024 === 0) return `${n / 1024}k`;
-  if (n >= 1000) return `${Math.round(n / 1000)}k`;
-  return String(n);
-}
-function fmtGb(bytes) {
+
+function fmtBytes(bytes) {
   if (bytes == null) return "—";
-  const gb = bytes / 1e9;
-  if (gb < 1) return `${(gb * 1000).toFixed(0)} MB`;
-  return gb >= 10 ? `${gb.toFixed(1)} GB` : `${gb.toFixed(2)} GB`;
-}
-function fmtTps(n) {
-  if (n == null || Number.isNaN(n)) return "—";
-  if (n >= 100) return `${n.toFixed(0)} tok/s`;
-  return `${n.toFixed(1)} tok/s`;
-}
-function fmtSec(n) {
-  if (n == null || !Number.isFinite(n)) return "—";
-  if (n < 0.05) return "<0.1s";
-  if (n < 1) return `${n.toFixed(1)}s`;
-  if (n < 10) return `${n.toFixed(1)}s`;
-  return `${n.toFixed(0)}s`;
-}
-function qualityOf(q) {
-  return { id: q || "other", label: q || "—", hint: q === "Q4_K_M" ? "Ollama default" : "" };
-}
-function fitLabel(fit) {
-  if (fit === "full") return "Full";
-  if (fit === "partial") return "Partial";
-  return "OOM";
-}
-function familyName(arch) {
-  if (arch === "qwen3moe") return "Qwen3 MoE";
-  if (arch === "qwen3") return "Qwen3";
-  if (arch === "gemma3") return "Gemma 3";
-  if (arch === "llama") return "Llama";
-  return arch;
-}
-function gpuShort(g) {
-  return g.name
-    .replace("NVIDIA GeForce ", "")
-    .replace("NVIDIA ", "")
-    .replace("Apple ", "");
-}
-function gpuOf(id) {
-  return DATA.gpus.find((g) => g.id === id);
-}
-function vramAt(m, ctx) {
-  const key = String(ctx);
-  if (m.vram[key] != null) return m.vram[key];
-  const keys = Object.keys(m.vram).map(Number).sort((a, b) => a - b);
-  let best = keys[0];
-  for (const k of keys) if (k <= ctx) best = k;
-  return m.vram[String(best)] ?? null;
-}
-function fitAt(m, gpuId, ctx) {
-  const g = m.gpu[gpuId];
-  if (!g) return "none";
-  return g.f[String(ctx)] || g.f[Object.keys(g.f).pop()] || "none";
+  const gb = bytes / GB;
+  return gb < 1 ? `${Math.round(gb * 1000)} MB` : `${gb.toFixed(gb >= 10 ? 1 : 2)} GB`;
 }
 
-function uniqueByDigest(models) {
-  const map = new Map();
-  for (const m of models) {
-    const cur = map.get(m.digest);
-    if (!cur) {
-      map.set(m.digest, { ...m, aliases: [] });
-      continue;
-    }
-    const prefer = m.ref.length < cur.ref.length || (m.ref.length === cur.ref.length && !/-/.test(m.tag) && /-/.test(cur.tag));
-    if (prefer) {
-      cur.aliases.push(cur.ref);
-      Object.assign(cur, m, { aliases: cur.aliases });
-    } else {
-      cur.aliases.push(m.ref);
-    }
+function fmtCtx(ctx) {
+  if (!ctx) return "—";
+  if (ctx < 1024) return String(ctx);
+  if (ctx % 1024 === 0) return `${ctx / 1024}k`;
+  const k = ctx / 1024;
+  return `${Number.isInteger(k) ? k : k.toFixed(1)}k`;
+}
+
+function attnLabel(row) {
+  if (row.n_global_layers && row.sliding_window) {
+    return `hybrid ${fmtCtx(row.sliding_window)} SWA + global`;
   }
-  return [...map.values()];
+  if (row.sliding_window) return `${fmtCtx(row.sliding_window)} sliding window`;
+  return "dense attention";
 }
 
-function pickScore(r) {
-  if (r.fit === "none") return -1e6;
-  const size = Math.log10(r.params);
-  const qf = QUANT_FACTOR[r.quant] ?? 0.8;
-  const fitN = r.fit === "full" ? 1 : 0.4;
-  const everyday = r.quant === "Q4_K_M" ? 0.08 : 0;
-  return (size * (0.7 + 0.3 * qf) + everyday) * fitN;
+function fmtSpeed(speed) {
+  if (speed == null || !Number.isFinite(speed)) return "Not modeled";
+  return `${speed >= 100 ? speed.toFixed(0) : speed.toFixed(1)} tok/s`;
 }
 
-function lede(r) {
-  const moe = r.experts ? ` MoE, ${fmtParams(r.active)} active of ${fmtParams(r.params)}` : ` ${fmtParams(r.params)}`;
-  const fit = r.fit === "full"
-    ? `full GPU at ${fmtCtx(state.ctx)}`
-    : r.fit === "partial"
-      ? `partial offload at ${fmtCtx(state.ctx)}`
-      : `OOM at ${fmtCtx(state.ctx)}`;
-  return `${familyName(r.arch)}${moe}, ${r.quant || "—"}. ${fmtGb(r.weight)} weights, ${fmtGb(r.vram)} VRAM, ${fit}. Speed ${fmtTps(r.decode)}.`;
+function gpuById(id) {
+  return hardware.gpus.find((gpu) => gpu.id === id);
 }
 
-const TTFT_PROMPT = 128; // same default as bench.py --prompt-tokens
-
-function ttftS(prefill, decode, n = TTFT_PROMPT) {
-  if (!prefill || prefill <= 0) return null;
-  return n / prefill + (decode > 0 ? 1 / decode : 0);
+function groupName(gpu) {
+  if (gpu.vendor === "apple") return "Apple silicon";
+  if (gpu.vendor === "amd") return "AMD";
+  if (gpu.vendor === "cpu") return "CPU only";
+  if (gpu.id.startsWith("rtx") && !gpu.id.startsWith("rtxa") && gpu.id !== "rtx6000ada") {
+    return "GeForce / RTX";
+  }
+  return "Datacenter / workstation";
 }
 
-function viewRow(m) {
-  const g = m.gpu[state.gpu];
-  const vram = vramAt(m, state.ctx);
-  const gpu = gpuOf(state.gpu);
-  const usable = gpu ? gpu.mem * gpu.use * 1e9 : null;
-  const decode = g?.d ?? null;
-  const prefill = g?.p ?? null;
-  const fit = fitAt(m, state.gpu, state.ctx);
-  const row = {
-    ...m,
-    decode,
-    prefill,
-    ceiling: g?.c ?? null,
-    maxctx: g?.m ?? 0,
-    fit,
-    vramMap: m.vram,
-    vram,
-    occ: usable && vram ? vram / usable : null,
-    ttft: ttftS(prefill, decode),
-    quality: qualityOf(m.quant),
-    download: m.weight,
-  };
-  row.pick = pickScore(row);
-  return row;
+function shortGpuName(gpu) {
+  return gpu.name.replace("NVIDIA GeForce ", "").replace("NVIDIA ", "").replace("Apple ", "");
 }
 
-function metricValue(row) {
-  if (state.metric === "pick") return row.pick;
-  if (state.metric === "speed") return row.decode;
-  if (state.metric === "latency") return row.ttft;
-  if (state.metric === "vram") return row.vram;
-  if (state.metric === "maxctx") return row.maxctx;
-  return row.pick;
+function vramAt(model, ctx) {
+  return model.vram_bytes_at_ctx[String(ctx)] ?? null;
 }
 
-function filteredRows() {
-  const base = state.unique ? uniqueByDigest(DATA.models) : DATA.models.map((m) => ({ ...m, aliases: [] }));
-  const size = SIZE_FILTERS.find((f) => f.id === state.size);
-  const kind = KIND_FILTERS.find((f) => f.id === state.kind);
-  const fit = FIT_FILTERS.find((f) => f.id === state.fit);
+function speedFor(model, gpu) {
+  const estimate = gpu.estimate;
+  if (!estimate || !model.active_weight_bytes || !model.layers) return null;
+  const seconds = (
+    model.active_weight_bytes / (estimate.bw_eff_gbs * GB)
+    + model.layers * estimate.c_s_per_layer
+    + estimate.d_s
+  );
+  const quantFactor = estimate.quant_factors[model.quant] ?? 1;
+  return seconds > 0 ? quantFactor / seconds : null;
+}
+
+function fitFor(model, gpu, ctx) {
+  if (!model.context_length || model.context_length < ctx) return "context";
+  const vram = vramAt(model, ctx);
+  if (vram == null) return "context";
+  const usable = gpu.memory_gb * gpu.usable_fraction * GB;
+  if (vram <= usable) return "full";
+  const totalMemory = usable + state.ram * GB;
+  if (model.weight_bytes + model.projector_bytes <= totalMemory) return "partial";
+  return "none";
+}
+
+function qualityProxy(model) {
+  const active = Math.max(1e8, model.active_params || model.params);
+  const scale = Math.max(0, Math.min(1, (Math.log10(active) - 8) / 3));
+  const quant = QUANT_QUALITY[model.quant] ?? 0.67;
+  return scale * 0.72 + quant * 0.28;
+}
+
+function recencyScore(pushedAt) {
+  if (!pushedAt) return 0;
+  const ms = Date.parse(pushedAt);
+  if (!Number.isFinite(ms)) return 0;
+  const ageDays = Math.max(0, (Date.now() - ms) / 86400000);
+  return Math.exp(-ageDays / 365);
+}
+
+function usecaseMatch(model) {
+  const signals = new Set(model.signals);
+  const name = model.ref.toLowerCase();
+  if (state.usecase === "vision") return signals.has("vision") ? 1 : 0;
+  if (state.usecase === "embedding") return signals.has("embedding") ? 1 : 0;
+  if (state.usecase === "code") return signals.has("code") ? 1 : signals.has("embedding") ? 0 : 0.2;
+  if (state.usecase === "long") {
+    const contextScore = Math.min(1, Math.log2(Math.max(model.context_length, 2048) / 2048) / 6);
+    return signals.has("embedding") ? 0.15 : 0.45 + contextScore * 0.55;
+  }
+  if (signals.has("embedding") || name.includes("guard")) return 0.02;
+  if (signals.has("code")) return 0.2;
+  if (/(?:^|[-_:])(base|text)(?:$|[-_:])/.test(name)) return 0.25;
+  if (name.includes("instruct") || name.includes("chat") || model.tag === "latest") return 1;
+  return signals.has("vision") ? 0.65 : 0.7;
+}
+
+function viewModel(model) {
+  const gpu = gpuById(state.gpu);
+  const fit = fitFor(model, gpu, state.ctx);
+  const rawSpeed = speedFor(model, gpu);
+  const speed = fit === "full" ? rawSpeed : null;
+  const usable = gpu.memory_gb * gpu.usable_fraction * GB;
+  const vram = vramAt(model, state.ctx);
+  const headroom = vram == null ? null : (usable - vram) / usable;
+  const capability = qualityProxy(model);
+  const match = usecaseMatch(model);
+  const recency = recencyScore(model.pushed_at);
+  const speedScore = rawSpeed ? Math.max(0, Math.min(1, Math.log10(rawSpeed + 1) / 2.4)) : 0;
+  const fitScore = fit === "full" ? 1 : fit === "partial" && state.allowPartial ? 0.3 : 0;
+  let score;
+  if (state.priority === "quality") score = capability * 60 + speedScore * 6 + match * 26 + fitScore * 18;
+  else if (state.priority === "speed") score = capability * 15 + speedScore * 52 + match * 20 + fitScore * 18;
+  else score = capability * 50 + speedScore * 14 + match * 26 + fitScore * 18;
+  score += recency * 12;
+  if (model.quant === "Q4_K_M") score += 3;
+  if (fit === "partial") score -= 16;
+  if (fit === "none" || fit === "context") score -= 100;
+  return { ...model, fit, speed, rawSpeed, vram, usable, headroom, capability, match, recency, score };
+}
+
+function isUsecaseCandidate(row) {
+  if (state.usecase === "vision" && !row.signals.includes("vision")) return false;
+  if (state.usecase === "embedding" && !row.signals.includes("embedding")) return false;
+  if (state.usecase !== "embedding" && row.signals.includes("embedding")) return false;
+  return true;
+}
+
+function fitsSelection(row) {
+  if (row.fit === "full") return true;
+  return state.allowPartial && row.fit === "partial";
+}
+
+function searchMatches(row) {
   const q = state.q.trim().toLowerCase();
-  return base
-    .map(viewRow)
-    .filter((m) => (state.family === "all" ? true : m.model === state.family))
-    .filter((m) => (state.quant === "all" ? true : m.quant === state.quant))
-    .filter((m) => size.test(m))
-    .filter((m) => kind.test(m))
-    .filter((m) => fit.test(m))
-    .filter((m) => {
-      if (!q) return true;
-      const blob = `${m.ref} ${m.arch} ${m.quant} ${m.model} ${familyName(m.arch)} ${m.quality.label} ${(m.aliases || []).join(" ")}`.toLowerCase();
-      return blob.includes(q);
-    });
+  if (!q) return true;
+  const copy = familyCopy(row);
+  return [
+    row.ref, row.model, row.arch, row.quant, row.description, copy.description,
+    ...row.aliases, ...row.signals,
+  ].join(" ").toLowerCase().includes(q);
 }
 
-function rankedRows() {
-  const rows = filteredRows();
-  const key = state.sortKey;
-  const dir = state.sortDir === "asc" ? 1 : -1;
-  const fitRank = { full: 2, partial: 1, none: 0 };
-  rows.sort((a, b) => {
-    let av;
-    let bv;
-    if (key === "fit") {
-      av = fitRank[a.fit] ?? 0;
-      bv = fitRank[b.fit] ?? 0;
-    } else if (key === "ref") {
-      return dir * a.ref.localeCompare(b.ref);
-    } else if (key === "quality") {
-      av = QUANT_FACTOR[a.quant] ?? 0;
-      bv = QUANT_FACTOR[b.quant] ?? 0;
-    } else {
-      av = a[key];
-      bv = b[key];
-    }
-    if (av == null && bv == null) return a.ref.localeCompare(b.ref);
-    if (av == null) return 1;
-    if (bv == null) return -1;
-    if (av === bv) return a.ref.localeCompare(b.ref);
-    return av > bv ? dir : -dir;
-  });
-  return rows;
+function sizeClassId(params) {
+  if (!params) return "unknown";
+  for (const cls of SIZE_CLASSES) {
+    if (cls.id === "unknown") continue;
+    if (params < cls.max) return cls.id;
+  }
+  return "frontier";
 }
 
-function names(rows, n = 2) {
-  return rows.slice(0, n).map((r) => r.ref);
+function sizeMatches(row) {
+  return state.sizes.includes(sizeClassId(row.params));
 }
 
-function blurbFor(rows) {
-  const gpu = gpuShort(gpuOf(state.gpu) || { name: state.gpu });
-  const ctx = fmtCtx(state.ctx);
-  if (!rows.length) return `No models match on ${gpu} at ${ctx}. Try All or a larger GPU.`;
-  const [a, b] = names(rows);
-  if (state.metric === "pick") return `${a} and ${b} rank highest that still run on ${gpu} at ${ctx}.`;
-  if (state.metric === "speed") return `${a} and ${b} have the highest decode tok/s on ${gpu}.`;
-  if (state.metric === "latency") return `${a} and ${b} have the lowest TTFT @ ${TTFT_PROMPT} on ${gpu}.`;
-  if (state.metric === "vram") return `${a} and ${b} use the least VRAM at ${ctx}.`;
-  return `${a} and ${b} stay fully resident to the longest context on ${gpu}.`;
+function sizesAreDefault() {
+  const known = defaultSizes();
+  return state.sizes.length === known.length && known.every((id) => state.sizes.includes(id));
 }
 
-function insightCopy(metricId) {
-  const saved = { metric: state.metric, sortKey: state.sortKey, sortDir: state.sortDir };
-  applyMetric(metricId);
-  const rows = rankedRows();
-  state.metric = saved.metric;
-  state.sortKey = saved.sortKey;
-  state.sortDir = saved.sortDir;
-  const [a, b] = names(rows);
-  if (!a) return "No models in this filter.";
-  if (metricId === "pick") return `${a} and ${b} are the top recommended fits.`;
-  if (metricId === "speed") return `${a} and ${b} lead decode tok/s.`;
-  if (metricId === "latency") return `${a} and ${b} have the lowest TTFT.`;
-  if (metricId === "vram") return `${a} and ${b} use the least VRAM.`;
-  return `${a} and ${b} have the highest max full-GPU context.`;
-}
-
-function populateSelects() {
-  $("gpu").innerHTML = GPU_GROUPS.map(([label, test]) => {
-    const opts = DATA.gpus.filter(test).map((g) =>
-      `<option value="${esc(g.id)}"${g.id === state.gpu ? " selected" : ""}>${esc(gpuShort(g))} (${g.mem} GB)</option>`
-    ).join("");
-    return `<optgroup label="${esc(label)}">${opts}</optgroup>`;
-  }).join("");
-  $("ctx").innerHTML = DATA.ctx_points.map((c) =>
-    `<option value="${c}"${c === state.ctx ? " selected" : ""}>${fmtCtx(c)}</option>`
-  ).join("");
-}
-
-function renderRig() {
-  const g = gpuOf(state.gpu);
-  if (!g) return;
-  const usable = (g.mem * g.use).toFixed(1);
-  const cal = DATA.calibrated_gpus.includes(g.id);
-  $("rig-spec").innerHTML = cal
-    ? `<strong>${esc(usable)} GB</strong> usable · calibrated`
-    : `<strong>${esc(usable)} GB</strong> usable of ${esc(g.mem)} GB · uncalibrated estimates`;
-}
-
-function renderInsights() {
-  $("insights").innerHTML = METRICS.map((m) => `
-    <button type="button" class="insight" data-metric="${m.id}" aria-selected="${state.metric === m.id}">
-      <span class="pill">${esc(m.label)}</span>
-      <p>${esc(insightCopy(m.id))}</p>
-    </button>
+function renderSizeFilter() {
+  const classes = availableSizeClasses();
+  const selected = classes.filter((cls) => state.sizes.includes(cls.id));
+  $("size-summary").textContent = sizesAreDefault()
+    ? "All sizes"
+    : selected.length
+      ? selected.map((cls) => cls.name).join(", ")
+      : "No sizes";
+  $("size-menu").innerHTML = classes.map((cls) => `
+    <label class="size-option">
+      <input type="checkbox" data-size="${esc(cls.id)}" ${state.sizes.includes(cls.id) ? "checked" : ""}>
+      <span>${esc(cls.name)}${cls.hint ? `<small>${esc(cls.hint)}</small>` : ""}</span>
+    </label>
   `).join("");
 }
 
-function renderTabs() {
-  $("tabs").innerHTML = METRICS.map((m) =>
-    `<button type="button" class="tab" role="tab" data-metric="${m.id}" aria-selected="${state.metric === m.id}">${esc(m.label)}</button>`
+function setSizeMenuOpen(open) {
+  state.sizeMenuOpen = open;
+  $("size-toggle").setAttribute("aria-expanded", String(open));
+  $("size-menu").hidden = !open;
+}
+
+function applySharedFilters(rows) {
+  if (state.fitFilter === "runnable") rows = rows.filter((r) => fitsSelection(r));
+  else if (state.fitFilter !== "all") rows = rows.filter((r) => r.fit === state.fitFilter);
+  if (state.archFilter !== "all") rows = rows.filter((r) => r.arch === state.archFilter);
+  if (state.quantFilter !== "all") rows = rows.filter((r) => r.quant === state.quantFilter);
+  return rows;
+}
+
+function rowsForView() {
+  let rows = catalog.models.filter(searchMatches).filter(sizeMatches).map(viewModel);
+  if (state.mode === "find") rows = rows.filter(isUsecaseCandidate);
+  rows = applySharedFilters(rows);
+  const sort = state.sort;
+  rows.sort((a, b) => {
+    if (sort === "newest") return (b.pushed_at || "").localeCompare(a.pushed_at || "");
+    if (sort === "name") return a.ref.localeCompare(b.ref);
+    if (sort === "speed") return (b.rawSpeed || -1) - (a.rawSpeed || -1);
+    if (sort === "vram") return (a.vram ?? Infinity) - (b.vram ?? Infinity);
+    if (sort === "context") return b.context_length - a.context_length;
+    if (sort === "capability") return b.capability - a.capability;
+    return b.score - a.score
+      || (b.pushed_at || "").localeCompare(a.pushed_at || "")
+      || a.ref.localeCompare(b.ref);
+  });
+  if (state.mode === "find") {
+    const families = new Set();
+    rows = rows.filter((row) => {
+      if (families.has(row.model)) return false;
+      families.add(row.model);
+      return true;
+    });
+  }
+  return rows;
+}
+
+function signalLabel(signal) {
+  return {
+    code: "Code-tuned signal",
+    vision: "Vision input",
+    embedding: "Embedding model",
+    reasoning: "Reasoning-tuned signal",
+  }[signal] || signal;
+}
+
+function fitLabel(fit) {
+  return { full: "Full GPU", partial: "Partial offload", none: "Doesn’t fit", context: "Context too short" }[fit];
+}
+
+function rationale(row) {
+  const parts = [];
+  if (row.fit === "full") {
+    const spare = Math.max(0, row.usable - row.vram);
+    parts.push(`${fmtBytes(spare)} GPU memory left at ${fmtCtx(state.ctx)} context`);
+  } else if (row.fit === "partial") {
+    parts.push("fits only by moving weights into system RAM");
+  }
+  if (state.usecase === "code" && row.signals.includes("code")) parts.push("catalog name indicates code tuning");
+  if (state.usecase === "vision") parts.push("includes a vision projector or multimodal architecture");
+  if (state.usecase === "embedding") parts.push("identified as an embedding architecture");
+  if (state.usecase === "long") parts.push(`supports up to ${fmtCtx(row.context_length)} trained context`);
+  if (state.priority === "speed" && row.rawSpeed) parts.push(`about ${fmtSpeed(row.rawSpeed)} when fully resident`);
+  if (state.priority === "quality") parts.push(`${fmtParams(row.active_params)} active parameters as a capability proxy`);
+  if (row.quant === "Q4_K_M") parts.push("uses Ollama’s common balanced quant");
+  if (!parts.length) {
+    if (row.fit === "context") return `trained context is below the requested ${fmtCtx(state.ctx)}.`;
+    if (row.fit === "none") return "model weights exceed the selected GPU and system-memory budget.";
+    return "shown for technical comparison; no recommendation claim is attached.";
+  }
+  return `${parts.slice(0, 2).join("; ")}.`;
+}
+
+function renderGpuSelect() {
+  const groups = new Map();
+  for (const gpu of hardware.gpus) {
+    const group = groupName(gpu);
+    if (!groups.has(group)) groups.set(group, []);
+    groups.get(group).push(gpu);
+  }
+  $("gpu").innerHTML = [...groups].map(([name, gpus]) => `
+    <optgroup label="${esc(name)}">
+      ${gpus.map((gpu) => `<option value="${esc(gpu.id)}">${esc(shortGpuName(gpu))} (${gpu.memory_gb} GB)${gpu.estimate.calibrated ? " — calibrated" : ""}</option>`).join("")}
+    </optgroup>
+  `).join("");
+  $("gpu").value = state.gpu;
+  $("ctx").innerHTML = hardware.ctx_points.map((ctx) =>
+    `<option value="${ctx}">${fmtCtx(ctx)} tokens</option>`
   ).join("");
-  $("view-list").setAttribute("aria-selected", state.view === "list" ? "true" : "false");
-  $("view-table").setAttribute("aria-selected", state.view === "table" ? "true" : "false");
+  $("ctx").value = String(state.ctx);
+
+  const arches = [...new Set(catalog.models.map((m) => m.arch))].sort();
+  $("arch-filter").innerHTML += arches.map((arch) => `<option value="${esc(arch)}">${esc(arch)}</option>`).join("");
+  const quants = [...new Set(catalog.models.map((m) => m.quant).filter((q) => q && q !== "unknown"))].sort();
+  $("quant-filter").innerHTML += quants.map((quant) => `<option value="${esc(quant)}">${esc(quant)}</option>`).join("");
 }
 
-function optionList(values, current, allLabel, nameFn) {
-  return values.map((id) => {
-    const label = id === "all" ? allLabel : (nameFn ? nameFn(id) : id);
-    return `<option value="${esc(id)}"${current === id ? " selected" : ""}>${esc(label)}</option>`;
-  }).join("");
+function renderBudget() {
+  const gpu = gpuById(state.gpu);
+  const usable = gpu.memory_gb * gpu.usable_fraction;
+  $("budget-value").textContent = `${usable.toFixed(1)} GB usable`;
+  $("budget-fill").style.width = `${gpu.usable_fraction * 100}%`;
+  $("budget-note").textContent = state.allowPartial
+    ? `Plus ${state.ram} GB system RAM for partial offload.`
+    : `${gpu.memory_gb} GB installed; recommendations stay fully on GPU.`;
 }
 
-function renderFilters() {
-  const families = ["all", ...[...new Set(DATA.models.map((m) => m.model))]];
-  const quants = ["all", ...[...new Set(DATA.models.map((m) => m.quant).filter(Boolean))]];
-  const uniqueChip = `<button type="button" class="chip" data-filter="unique" data-id="unique" aria-pressed="${state.unique}">${state.unique ? "Unique weights" : "All tags"}</button>`;
-  const familySel = `<select data-filter="family" aria-label="Family">${optionList(families, state.family, "Family: all", (id) => id)}</select>`;
-  const quantSel = `<select data-filter="quant" aria-label="Quant">${optionList(quants, state.quant, "Quant: all")}</select>`;
-  const sizeChips = SIZE_FILTERS.map((f) =>
-    `<button type="button" class="chip" data-filter="size" data-id="${f.id}" aria-pressed="${state.size === f.id}">${esc(f.label)}</button>`
-  );
-  const kindChips = KIND_FILTERS.map((f) =>
-    `<button type="button" class="chip" data-filter="kind" data-id="${f.id}" aria-pressed="${state.kind === f.id}">${esc(f.label)}</button>`
-  );
-  const fitChips = FIT_FILTERS.map((f) =>
-    `<button type="button" class="chip" data-filter="fit" data-id="${f.id}" aria-pressed="${state.fit === f.id}">${esc(f.label)}</button>`
-  );
-  $("filters").innerHTML = [uniqueChip, familySel, quantSel, ...fitChips, ...sizeChips, ...kindChips].join("");
+function renderCalibration() {
+  const gpu = gpuById(state.gpu);
+  const calibrated = gpu.estimate.calibrated;
+  $("calibration-note").className = `notice${calibrated ? "" : " warning"}`;
+  $("calibration-note").innerHTML = calibrated
+    ? `<strong>L4-calibrated speed model.</strong> Estimates use measured L4 coefficients; individual tags were not all benchmarked. VRAM confidence is shown per result.`
+    : `<strong>Experimental speed estimate.</strong> ${esc(shortGpuName(gpu))} has not been benchmark-calibrated. Fit uses the VRAM model; speed transfers L4-derived coefficients to hardware specs.`;
 }
 
-function renderChart(rows) {
-  const wrap = $("chart-wrap");
-  wrap.hidden = state.view !== "table";
-  if (state.view !== "table") {
-    if (chart) { chart.destroy(); chart = null; }
-    return;
+function familyCopy(row) {
+  const fam = catalog.library && catalog.library[row.model];
+  if (fam) return fam;
+  return { description: row.description || "", readme: "" };
+}
+
+function technicalHtml(row) {
+  if (state.open !== row.ref) return "";
+  const readme = familyCopy(row).readme || "";
+  if (!readme) {
+    return `<p class="library-link"><a href="https://ollama.com/library/${encodeURIComponent(row.model)}" target="_blank" rel="noopener noreferrer">Ollama library page</a></p>`;
   }
-  const top = rows.slice(0, 10);
-  const labels = top.map((r) => (r.ref.length > 26 ? `${r.ref.slice(0, 24)}…` : r.ref));
-  const data = top.map((r) => {
-    const v = metricValue(r);
-    if (state.metric === "vram") return v == null ? 0 : v / 1e9;
-    if (state.metric === "pick") return Math.max(0, v);
-    if (state.metric === "latency") return r.ttft ?? 0;
-    return v ?? 0;
-  });
-  if (chart) chart.destroy();
-  if (!window.Chart) return;
-  chart = new Chart($("rank-chart"), {
-    type: "bar",
-    data: {
-      labels,
-      datasets: [{ data, backgroundColor: "rgba(15, 110, 106, 0.72)", borderWidth: 0, borderRadius: 2 }],
-    },
-    options: {
-      indexAxis: "y",
-      animation: window.matchMedia("(prefers-reduced-motion: reduce)").matches ? false : { duration: 280 },
-      plugins: {
-        legend: { display: false },
-        tooltip: {
-          callbacks: {
-            label: (c) => {
-              const row = top[c.dataIndex];
-              if (state.metric === "vram") return fmtGb(row.vram);
-              if (state.metric === "maxctx") return fmtCtx(row.maxctx);
-              if (state.metric === "pick") return familyName(row.arch);
-              if (state.metric === "latency") return fmtSec(row.ttft);
-              return fmtTps(row.decode);
-            },
-          },
-        },
-      },
-      scales: {
-        x: { grid: { color: "#e6ebf0" }, ticks: { font: { family: "IBM Plex Sans", size: 11 } } },
-        y: { grid: { display: false }, ticks: { font: { family: "IBM Plex Sans", size: 11 } } },
-      },
-    },
-  });
+  return `
+    <div class="library-readme">${mdToHtml(readme)}
+      <p class="library-link"><a href="https://ollama.com/library/${encodeURIComponent(row.model)}" target="_blank" rel="noopener noreferrer">Ollama library page</a></p>
+    </div>`;
 }
 
-function sortAria(key) {
-  if (state.sortKey !== key) return "none";
-  return state.sortDir === "asc" ? "ascending" : "descending";
-}
-
-function ladder(m) {
-  return DATA.ctx_points.map((c) => {
-    const f = m.gpu[state.gpu]?.f[String(c)] || "none";
-    const title = `${fmtCtx(c)}: ${fitLabel(f)}`;
-    return `<i class="tick ${f}" title="${esc(title)}"></i>`;
-  }).join("");
-}
-
-function meter(value, max, text) {
-  const pct = max > 0 && value != null ? Math.max(2, Math.min(100, (value / max) * 100)) : 0;
-  return `<div class="meter"><span class="fill" style="width:${pct}%"></span><span class="val">${esc(text)}</span></div>`;
-}
-
-function vramBars(r, maxVram) {
-  return DATA.ctx_points.map((c) => {
-    const b = r.vramMap[String(c)] ?? vramAt(r, c);
-    const h = maxVram ? Math.max(8, (b / maxVram) * 100) : 8;
-    const f = r.gpu[state.gpu]?.f[String(c)] || "";
-    const color = f === "full" ? "var(--full)" : f === "partial" ? "var(--partial)" : "var(--none)";
-    return `<div class="vram-col"><i style="height:${h}%;background:${color}"></i><span>${fmtCtx(c)}</span></div>`;
-  }).join("");
-}
-
-function renderList(rows) {
-  const maxVram = Math.max(0, ...rows.map((r) => r.vram || 0));
-  $("list").hidden = state.view !== "list";
-  if (state.view !== "list") {
-    $("list").innerHTML = "";
-    return;
-  }
-  $("list").innerHTML = rows.map((r, i) => {
-    const open = state.open === r.ref;
-    const alias = r.aliases?.length ? ` · ${r.aliases.length} alias${r.aliases.length > 1 ? "es" : ""}` : "";
-    const cmd = `ollama run ${r.ref}`;
-    const detail = open ? `
-      <div class="card-detail">
-        <dl class="detail-grid">
-          <div><dt>Weights</dt><dd>${fmtGb(r.weight)}</dd></div>
-          <div><dt>${r.experts ? "Active params" : "Params"}</dt><dd>${fmtParams(r.active)}${r.experts ? ` / ${fmtParams(r.params)}` : ""}</dd></div>
-          <div><dt>Max full ctx</dt><dd>${r.maxctx ? fmtCtx(r.maxctx) : "—"}</dd></div>
-          <div><dt>Quant</dt><dd>${esc(r.quant || "—")}${r.quality.hint ? ` · ${esc(r.quality.hint)}` : ""}</dd></div>
-          <div><dt>TTFT @ ${TTFT_PROMPT}</dt><dd>${fmtSec(r.ttft)}${r.prefill && r.decode ? ` (${(TTFT_PROMPT / r.prefill).toFixed(2)}s prefill + ${(1 / r.decode).toFixed(2)}s decode)` : ""}</dd></div>
-        </dl>
-        <div class="vram-bars">${vramBars(r, maxVram)}</div>
-      </div>` : "";
-    return `
-      <article class="card${open ? " is-open" : ""}" data-ref="${esc(r.ref)}" tabindex="0">
-        <div class="card-top">
-          <div>
-            <h3>${esc(r.ref)}</h3>
-            <p class="family-line">${esc(familyName(r.arch))} · #${i + 1}${esc(alias)}</p>
+function cardHtml(row, index) {
+  const command = `ollama run ${row.ref}`;
+  const headroomPct = row.headroom == null ? 0 : Math.max(0, Math.min(100, row.headroom * 100));
+  const speedSub = row.fit === "partial" ? "partial speed unavailable" : (
+    gpuById(state.gpu).estimate.calibrated ? "calibrated formula" : "experimental"
+  );
+  const vramSub = row.vram_digest_calibrated ? "digest-calibrated" : "global formula";
+  const signals = row.signals.map((signal) => `<span class="signal">${esc(signalLabel(signal))}</span>`).join("");
+  const description = familyCopy(row).description || row.description || "";
+  const open = state.open === row.ref;
+  return `
+    <article class="model-card${open ? " is-open" : ""}" data-ref="${esc(row.ref)}" aria-expanded="${open}">
+      <div>
+        <div class="card-heading">
+          <span class="rank">${index + 1}</span>
+          <div class="model-title">
+            <h3>${esc(row.ref)}</h3>
+            <p>${paramHeadline(row)} · ${esc(row.quant || "—")} · ${esc(row.arch)}${row.pushed_at ? ` · ${fmtPushed(row.pushed_at)}` : ""}</p>
           </div>
-          <span class="badge ${r.fit}">${esc(fitLabel(r.fit))}</span>
+          <span class="fit-badge ${row.fit}">${esc(fitLabel(row.fit))}</span>
         </div>
-        <p class="lede">${esc(lede(r))}</p>
-        <ul class="pills">
-          <li>${fmtGb(r.weight)}</li>
-          <li>${fmtTps(r.decode)}</li>
-          <li>${fmtSec(r.ttft)} TTFT</li>
-          <li>${fmtGb(r.vram)} VRAM</li>
-          <li>${esc(r.quant || "—")}</li>
-          <li>${fmtCtx(r.ctx)} ctx</li>
-        </ul>
-        <div class="run">
-          <code>${esc(cmd)}</code>
-          <button type="button" class="copy" data-copy="${esc(cmd)}">Copy</button>
+        ${description ? `<p class="library-desc">${esc(description)}</p>` : ""}
+        <p class="why">${esc(rationale(row))}</p>
+        <div class="signals">
+          ${signals}
+          ${row.vram_digest_calibrated ? `<span class="signal">Measured VRAM offset</span>` : ""}
         </div>
-        ${detail}
-      </article>`;
-  }).join("");
+      </div>
+      <div>
+        <div class="metrics">
+          <div class="metric"><span>VRAM @ ${fmtCtx(state.ctx)}</span><strong>${fmtBytes(row.vram)}</strong><small>${vramSub}</small><div class="headroom"><i style="width:${headroomPct}%"></i></div></div>
+          <div class="metric"><span>Decode speed</span><strong>${fmtSpeed(row.speed)}</strong><small>${speedSub}</small></div>
+          <div class="metric"><span>Trained context</span><strong>${fmtCtx(row.context_length)}</strong><small>${attnLabel(row)}</small></div>
+          <div class="metric"><span>Active size</span><strong>${fmtParams(row.active_params)}</strong><small>${row.ple_bytes ? "effective params; PLE embeddings in RAM" : row.experts ? `${row.expert_used}/${row.experts} experts active` : "dense model"}</small></div>
+        </div>
+        <div class="card-actions">
+          <div class="run-command"><code>${esc(command)}</code><button type="button" data-copy="${esc(command)}">Copy</button></div>
+          <span class="confidence">${row.vram_digest_calibrated ? "Higher VRAM confidence" : "Estimated VRAM"}</span>
+        </div>
+      </div>
+      ${technicalHtml(row)}
+    </article>`;
 }
 
-function renderTable(rows) {
-  const wrap = $("table-wrap");
-  wrap.hidden = state.view !== "table";
-  if (state.view !== "table") return;
-  const maxDecode = Math.max(0, ...rows.map((r) => r.decode || 0));
-  const maxTtft = Math.max(0, ...rows.map((r) => r.ttft || 0));
-  const maxVram = Math.max(0, ...rows.map((r) => r.vram || 0));
-  const maxCtx = Math.max(0, ...rows.map((r) => r.maxctx || 0));
-
-  $("grid").querySelector("thead").innerHTML = `
-    <tr>
-      <th class="sortable" data-sort="ref" aria-sort="${sortAria("ref")}">Model</th>
-      <th>Family</th>
-      <th class="sortable" data-sort="quality" aria-sort="${sortAria("quality")}">Quant</th>
-      <th class="sortable num" data-sort="download" aria-sort="${sortAria("download")}">Weights</th>
-      <th class="group sortable num" data-sort="decode" aria-sort="${sortAria("decode")}">Speed</th>
-      <th class="sortable num" data-sort="ttft" aria-sort="${sortAria("ttft")}">Latency</th>
-      <th class="group sortable num" data-sort="vram" aria-sort="${sortAria("vram")}">VRAM @ ${fmtCtx(state.ctx)}</th>
-      <th class="sortable" data-sort="fit" aria-sort="${sortAria("fit")}">Fit</th>
-      <th class="sortable num" data-sort="maxctx" aria-sort="${sortAria("maxctx")}">Max full ctx</th>
-    </tr>
-  `;
-
-  $("grid").querySelector("tbody").innerHTML = rows.map((r, i) => {
-    const open = state.open === r.ref;
-    const detail = open ? `
-      <tr class="detail"><td colspan="9">
-        <p class="lede">${esc(lede(r))}</p>
-        <div class="run"><code>ollama run ${esc(r.ref)}</code>
-          <button type="button" class="copy" data-copy="ollama run ${esc(r.ref)}">Copy</button></div>
-        <div class="vram-bars">${vramBars(r, maxVram)}</div>
-      </td></tr>` : "";
-    return `
-      <tr data-ref="${esc(r.ref)}" class="${open ? "is-open" : ""}">
-        <td class="model">
-          <span class="ref">${esc(r.ref)}</span>
-          <span class="sub">${fmtParams(r.params)} · #${i + 1}</span>
-        </td>
-        <td><span class="family"><i class="dot ${esc(r.arch)}"></i>${esc(familyName(r.arch))}</span></td>
-        <td>${esc(r.quant || "—")}</td>
-        <td class="num">${fmtGb(r.weight)}</td>
-        <td class="group num">${meter(r.decode, maxDecode, fmtTps(r.decode))}</td>
-        <td class="num">${meter(maxTtft && r.ttft != null ? maxTtft - r.ttft : null, maxTtft, fmtSec(r.ttft))}</td>
-        <td class="group num">${meter(r.vram, maxVram, fmtGb(r.vram))}</td>
-        <td>
-          <span class="fit ${r.fit}">${esc(fitLabel(r.fit))}</span>
-          <div class="ladder" aria-hidden="true">${ladder(r)}</div>
-        </td>
-        <td class="num">${meter(r.maxctx, maxCtx, r.maxctx ? fmtCtx(r.maxctx) : "—")}</td>
-      </tr>${detail}`;
-  }).join("");
+function renderResults() {
+  const rows = rowsForView();
+  const visibleRows = rows.slice(0, state.visible);
+  const usecase = USECASES[state.usecase].label;
+  $("results-label").textContent = state.mode === "find" ? "Recommendations" : "Full catalog";
+  $("results-title").textContent = state.mode === "find"
+    ? `${rows.length.toLocaleString()} fits for ${usecase}`
+    : `${rows.length.toLocaleString()} models match`;
+  $("results").innerHTML = visibleRows.map(cardHtml).join("");
+  $("empty").hidden = rows.length !== 0;
+  $("load-more").hidden = visibleRows.length >= rows.length;
+  $("result-count").textContent = rows.length
+    ? `Showing ${visibleRows.length.toLocaleString()} of ${rows.length.toLocaleString()} unique weight files`
+    : "";
+  $("results").closest(".results-panel").setAttribute("aria-busy", "false");
 }
 
-function applyMetric(id) {
-  state.metric = id;
-  if (id === "speed") {
-    state.sortKey = "decode";
-    state.sortDir = "desc";
-  } else if (id === "latency") {
-    state.sortKey = "ttft";
-    state.sortDir = "asc";
-  } else {
-    state.sortKey = id === "maxctx" ? "maxctx" : id;
-    state.sortDir = id === "vram" ? "asc" : "desc";
-  }
-}
-
-function readUrl() {
-  const u = new URL(location.href);
-  const gpu = u.searchParams.get("gpu");
-  const ctx = Number(u.searchParams.get("ctx"));
-  const metric = u.searchParams.get("metric");
-  const view = u.searchParams.get("view");
-  if (gpu) state.gpu = gpu;
-  if (DATA.ctx_points.includes(ctx)) state.ctx = ctx;
-  const mapped = { decode: "speed", prefill: "latency" }[metric] || metric;
-  if (METRICS.some((m) => m.id === mapped)) applyMetric(mapped);
-  if (view === "list" || view === "table") state.view = view;
+function renderMode() {
+  document.querySelectorAll("[data-mode]").forEach((button) => {
+    button.setAttribute("aria-selected", String(button.dataset.mode === state.mode));
+  });
+  $("search-wrap").hidden = state.mode !== "explore";
 }
 
 function writeUrl() {
-  const u = new URL(location.href);
-  u.searchParams.set("gpu", state.gpu);
-  u.searchParams.set("ctx", String(state.ctx));
-  u.searchParams.set("metric", state.metric);
-  u.searchParams.set("view", state.view);
-  history.replaceState(null, "", u);
+  const url = new URL(location.href);
+  const values = {
+    mode: state.mode, gpu: state.gpu, ram: state.ram, ctx: state.ctx,
+    usecase: state.usecase, priority: state.priority,
+    fit: state.fitFilter, arch: state.archFilter, quant: state.quantFilter, sort: state.sort,
+  };
+  for (const [key, value] of Object.entries(values)) url.searchParams.set(key, String(value));
+  if (state.allowPartial) url.searchParams.set("partial", "1");
+  else url.searchParams.delete("partial");
+  if (sizesAreDefault()) url.searchParams.delete("size");
+  else url.searchParams.set("size", state.sizes.join(","));
+  history.replaceState(null, "", url);
+}
+
+function readUrl() {
+  const params = new URL(location.href).searchParams;
+  if (["find", "explore"].includes(params.get("mode"))) state.mode = params.get("mode");
+  if (hardware.gpus.some((g) => g.id === params.get("gpu"))) state.gpu = params.get("gpu");
+  if ([8, 16, 32, 64, 128, 256].includes(Number(params.get("ram")))) state.ram = Number(params.get("ram"));
+  if (hardware.ctx_points.includes(Number(params.get("ctx")))) state.ctx = Number(params.get("ctx"));
+  if (USECASES[params.get("usecase")]) state.usecase = params.get("usecase");
+  if (["balanced", "quality", "speed"].includes(params.get("priority"))) state.priority = params.get("priority");
+  state.allowPartial = params.get("partial") === "1";
+  if (["runnable", "full", "partial", "all"].includes(params.get("fit"))) state.fitFilter = params.get("fit");
+  if (params.get("arch")) state.archFilter = params.get("arch");
+  if (params.get("quant")) state.quantFilter = params.get("quant");
+  if (["recommended", "capability", "speed", "vram", "context", "newest", "name"].includes(params.get("sort"))) {
+    state.sort = params.get("sort");
+  }
+  if (params.get("size")) {
+    const wanted = params.get("size").split(",").filter((id) => presentSizeIds.includes(id));
+    if (wanted.length) state.sizes = wanted;
+  }
+}
+
+function syncControls() {
+  $("gpu").value = state.gpu;
+  $("ram").value = String(state.ram);
+  $("ctx").value = String(state.ctx);
+  $("allow-partial").checked = state.allowPartial;
+  $("fit-filter").value = state.fitFilter;
+  $("arch-filter").value = state.archFilter;
+  $("quant-filter").value = state.quantFilter;
+  $("sort").value = state.sort;
+  document.querySelectorAll("[data-usecase]").forEach((button) =>
+    button.setAttribute("aria-pressed", String(button.dataset.usecase === state.usecase)));
+  document.querySelectorAll("[data-priority]").forEach((button) =>
+    button.setAttribute("aria-pressed", String(button.dataset.priority === state.priority)));
+  renderSizeFilter();
 }
 
 function render() {
-  const wrap = document.querySelector(".table-wrap");
-  const scrollY = wrap ? wrap.scrollTop : 0;
-  const rows = rankedRows();
-  renderRig();
-  renderInsights();
-  renderTabs();
-  $("blurb").textContent = blurbFor(rows);
-  renderFilters();
-  renderChart(rows);
-  renderList(rows);
-  renderTable(rows);
-  $("count").textContent = `${rows.length} models · context ${fmtCtx(state.ctx)}`;
-  $("foot-note").textContent = DATA.calibrated_gpus.includes(state.gpu)
-    ? "Speed (decode tok/s) and latency (TTFT) on this GPU are measured."
-    : "Speed is decode tok/s from memory bandwidth. Latency is TTFT @ 128 tok (n/prefill + 1/decode). Uncalibrated until a bench run.";
+  renderMode();
+  renderBudget();
+  renderCalibration();
+  renderSizeFilter();
+  renderResults();
   writeUrl();
-  if (wrap) wrap.scrollTop = scrollY;
 }
 
-function copyText(text, btn) {
-  navigator.clipboard.writeText(text).then(() => {
-    const prev = btn.textContent;
-    btn.textContent = "Copied";
-    setTimeout(() => { btn.textContent = prev; }, 1200);
-  }).catch(() => {
-    btn.textContent = "Copy failed";
-  });
+function resetVisible() {
+  state.visible = state.mode === "find" ? PAGE_FIND : PAGE_EXPLORE;
+  state.open = null;
 }
 
 function bind() {
-  $("gpu").addEventListener("change", (e) => { state.gpu = e.target.value; state.open = null; render(); });
-  $("ctx").addEventListener("change", (e) => { state.ctx = Number(e.target.value); state.open = null; render(); });
-  $("q").addEventListener("input", (e) => { state.q = e.target.value; render(); });
-  $("insights").addEventListener("click", (e) => {
-    const btn = e.target.closest("[data-metric]");
-    if (!btn) return;
-    applyMetric(btn.dataset.metric);
+  document.querySelector(".mode-switch").addEventListener("click", (event) => {
+    const button = event.target.closest("[data-mode]");
+    if (!button) return;
+    state.mode = button.dataset.mode;
+    resetVisible();
     render();
   });
-  $("tabs").addEventListener("click", (e) => {
-    const btn = e.target.closest("[data-metric]");
-    if (!btn) return;
-    applyMetric(btn.dataset.metric);
+  $("gpu").addEventListener("change", (event) => { state.gpu = event.target.value; resetVisible(); render(); });
+  $("ram").addEventListener("change", (event) => { state.ram = Number(event.target.value); resetVisible(); render(); });
+  $("ctx").addEventListener("change", (event) => { state.ctx = Number(event.target.value); resetVisible(); render(); });
+  $("allow-partial").addEventListener("change", (event) => { state.allowPartial = event.target.checked; resetVisible(); render(); });
+  $("usecase-group").addEventListener("click", (event) => {
+    const button = event.target.closest("[data-usecase]");
+    if (!button) return;
+    state.usecase = button.dataset.usecase;
+    resetVisible();
+    syncControls();
     render();
   });
-  document.querySelector(".view-toggle").addEventListener("click", (e) => {
-    const btn = e.target.closest("[data-view]");
-    if (!btn) return;
-    state.view = btn.dataset.view;
+  $("priority-group").addEventListener("click", (event) => {
+    const button = event.target.closest("[data-priority]");
+    if (!button) return;
+    state.priority = button.dataset.priority;
+    resetVisible();
+    syncControls();
     render();
   });
-  $("filters").addEventListener("click", (e) => {
-    const btn = e.target.closest("button[data-filter]");
-    if (!btn) return;
-    const key = btn.dataset.filter;
-    if (key === "unique") state.unique = !state.unique;
-    else state[key] = btn.dataset.id;
-    state.open = null;
-    render();
+  $("q").addEventListener("input", (event) => { state.q = event.target.value; resetVisible(); renderResults(); });
+  for (const [id, key] of [
+    ["fit-filter", "fitFilter"], ["arch-filter", "archFilter"],
+    ["quant-filter", "quantFilter"], ["sort", "sort"],
+  ]) {
+    $(id).addEventListener("change", (event) => {
+      state[key] = event.target.value;
+      resetVisible();
+      renderResults();
+      writeUrl();
+    });
+  }
+  $("load-more").addEventListener("click", () => {
+    state.visible += state.mode === "find" ? PAGE_FIND : PAGE_EXPLORE;
+    renderResults();
   });
-  $("filters").addEventListener("change", (e) => {
-    const el = e.target.closest("select[data-filter]");
-    if (!el) return;
-    state[el.dataset.filter] = el.value;
-    state.open = null;
-    render();
-  });
-  const onCopy = (e) => {
-    const btn = e.target.closest("[data-copy]");
-    if (!btn) return;
-    e.preventDefault();
-    e.stopPropagation();
-    copyText(btn.dataset.copy, btn);
+  const toggleCard = (card) => {
+    if (!card) return;
+    const ref = card.dataset.ref;
+    state.open = state.open === ref ? null : ref;
+    renderResults();
   };
-  $("list").addEventListener("click", (e) => {
-    if (e.target.closest("[data-copy]")) return onCopy(e);
-    const card = e.target.closest("[data-ref]");
-    if (!card) return;
-    state.open = state.open === card.dataset.ref ? null : card.dataset.ref;
-    render();
-  });
-  $("list").addEventListener("keydown", (e) => {
-    if (e.key !== "Enter" && e.key !== " ") return;
-    const card = e.target.closest("[data-ref]");
-    if (!card) return;
-    e.preventDefault();
-    state.open = state.open === card.dataset.ref ? null : card.dataset.ref;
-    render();
-  });
-  $("grid").addEventListener("click", (e) => {
-    if (e.target.closest("[data-copy]")) return onCopy(e);
-    const th = e.target.closest("th.sortable");
-    if (th) {
-      const key = th.dataset.sort;
-      if (state.sortKey === key) state.sortDir = state.sortDir === "desc" ? "asc" : "desc";
-      else {
-        state.sortKey = key;
-        state.sortDir = key === "vram" || key === "ttft" || key === "ref" ? "asc" : "desc";
+  $("results").addEventListener("click", async (event) => {
+    const copy = event.target.closest("[data-copy]");
+    if (copy) {
+      event.stopPropagation();
+      const previous = copy.textContent;
+      try {
+        await navigator.clipboard.writeText(copy.dataset.copy);
+        copy.textContent = "Copied";
+      } catch {
+        copy.textContent = "Copy failed";
       }
-      render();
+      setTimeout(() => { copy.textContent = previous; }, 1200);
       return;
     }
-    const tr = e.target.closest("tbody tr[data-ref]");
-    if (!tr) return;
-    state.open = state.open === tr.dataset.ref ? null : tr.dataset.ref;
+    if (event.target.closest("a, button, .library-readme")) return;
+    toggleCard(event.target.closest(".model-card"));
+  });
+  $("size-toggle").addEventListener("click", (event) => {
+    event.stopPropagation();
+    setSizeMenuOpen(!state.sizeMenuOpen);
+  });
+  $("size-menu").addEventListener("change", (event) => {
+    const box = event.target.closest("[data-size]");
+    if (!box) return;
+    const id = box.dataset.size;
+    if (box.checked && !state.sizes.includes(id)) state.sizes.push(id);
+    if (!box.checked) state.sizes = state.sizes.filter((s) => s !== id);
+    resetVisible();
+    $("size-summary").textContent = sizesAreDefault()
+      ? "All sizes"
+      : state.sizes.length
+        ? availableSizeClasses().filter((cls) => state.sizes.includes(cls.id)).map((cls) => cls.name).join(", ")
+        : "No sizes";
+    renderResults();
+    writeUrl();
+  });
+  document.addEventListener("click", (event) => {
+    if (!state.sizeMenuOpen) return;
+    if (event.target.closest("#size-filter")) return;
+    setSizeMenuOpen(false);
+  });
+  document.addEventListener("keydown", (event) => {
+    if (event.key === "Escape") setSizeMenuOpen(false);
+  });
+  $("reset").addEventListener("click", () => {
+    Object.assign(state, {
+      mode: "find", gpu: hardware.gpus.some((g) => g.id === "l4") ? "l4" : hardware.gpus[0].id,
+      ram: 32, ctx: 8192, usecase: "chat", priority: "balanced", allowPartial: false,
+      q: "", fitFilter: "runnable", archFilter: "all", quantFilter: "all",
+      sort: "recommended", sizes: defaultSizes(), sizeMenuOpen: false,
+    });
+    $("q").value = "";
+    setSizeMenuOpen(false);
+    resetVisible();
+    syncControls();
     render();
   });
+}
+
+async function loadData() {
+  const base = String(window.MODELINDEX_DATA_BASE || "../prod/data").replace(/\/$/, "");
+  const [manifestResponse, gpuResponse, modelResponse, libraryResponse] = await Promise.all([
+    fetch(`${base}/manifest.json`),
+    fetch(`${base}/gpus.json`),
+    fetch(`${base}/models.json`),
+    fetch(`${base}/library.json`),
+  ]);
+  for (const response of [manifestResponse, gpuResponse, modelResponse]) {
+    if (!response.ok) throw new Error(`${response.url} returned ${response.status}`);
+  }
+  [manifest, hardware, catalog] = await Promise.all([
+    manifestResponse.json(), gpuResponse.json(), modelResponse.json(),
+  ]);
+  catalog.library = {};
+  if (libraryResponse.ok) {
+    const library = await libraryResponse.json();
+    if (library.schema_version && library.schema_version !== manifest.schema_version) {
+      throw new Error("Production data schema versions do not match");
+    }
+    catalog.library = library.families || {};
+  }
+  if (manifest.schema_version !== hardware.schema_version || manifest.schema_version !== catalog.schema_version) {
+    throw new Error("Production data schema versions do not match");
+  }
 }
 
 async function main() {
-  const res = await fetch("data.json");
-  if (!res.ok) {
-    $("blurb").textContent = "Could not load data.json. Serve this folder over HTTP.";
-    return;
+  try {
+    await loadData();
+    collectPresentSizes();
+    state.sizes = defaultSizes();
+    readUrl();
+    renderGpuSelect();
+    syncControls();
+    bind();
+    render();
+    $("data-status").textContent = `${manifest.unique_models.toLocaleString()} unique models · ${manifest.gpu_count} hardware profiles`;
+    $("footer-meta").textContent = `Data ${manifest.generated.slice(0, 10)} · VRAM ${manifest.vram_formula} · schema v${manifest.schema_version}`;
+  } catch (error) {
+    $("data-status").textContent = "Catalog unavailable";
+    $("results-title").textContent = "Could not load production data";
+    $("calibration-note").className = "notice warning";
+    $("calibration-note").textContent = `${error.message}. Serve the repository root over HTTP and open /web/.`;
+    $("results").closest(".results-panel").setAttribute("aria-busy", "false");
   }
-  DATA = await res.json();
-  if (!gpuOf(state.gpu)) state.gpu = DATA.gpus[0].id;
-  readUrl();
-  populateSelects();
-  $("gpu").value = state.gpu;
-  $("ctx").value = String(state.ctx);
-  bind();
-  render();
 }
 
-main().catch((err) => {
-  $("blurb").textContent = `Failed to start: ${err.message}`;
-});
+main();
