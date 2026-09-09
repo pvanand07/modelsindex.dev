@@ -682,6 +682,17 @@ function sourceIconHtml(kind, href, label, verified) {
   return `<a class="source-icon" href="${esc(href)}" target="_blank" rel="noopener noreferrer" title="${esc(label)}" aria-label="${esc(label)}">${SOURCE_ICONS[kind]}${mark}</a>`;
 }
 
+// links.hf is release-scoped: {release, family}, either possibly null. A family can bundle
+// genuinely different upstream releases at different sizes (llava:7b/13b/34b are different
+// checkpoints entirely), so a release-specific pick is preferred whenever one exists; the
+// family-wide guess is kept as a fallback, not silently dropped, but flagged as such.
+function resolvedHf(row) {
+  const hf = (row.links || {}).hf;
+  if (!hf) return null;
+  const link = hf.release || hf.family;
+  return link ? { ...link, isFamilyOnly: !hf.release && !!hf.family } : null;
+}
+
 function sourceConfidenceHint(key, link) {
   if (!link) return "";
   if (key !== "hf") {
@@ -691,11 +702,12 @@ function sourceConfidenceHint(key, link) {
       : link.method === "homepage_llm" ? "found via the model's homepage"
       : "linked from the Ollama readme";
   }
-  return link.confidence === "verified" ? "byte-identical file match"
+  const base = link.confidence === "verified" ? "byte-identical file match"
     : link.method === "github_llm" ? "found via the model's GitHub repo, not hash-verified"
     : link.method === "homepage_llm" ? "found via the model's homepage, not hash-verified"
     : link.method === "readme_verified" ? "named in the readme, LLM-confirmed but not hash-verified"
     : "named in the readme, not hash-verified";
+  return link.isFamilyOnly ? `${base}, family-wide guess, not confirmed for this exact size` : base;
 }
 
 function sourceIconsHtml(row) {
@@ -703,7 +715,7 @@ function sourceIconsHtml(row) {
   const links = row.links || {};
   for (const kind of ["huggingface", "github", "homepage", "paper"]) {
     const key = kind === "huggingface" ? "hf" : kind;
-    const link = links[key];
+    const link = key === "hf" ? resolvedHf(row) : links[key];
     if (!link || !link.url) continue;
     const verified = link.confidence === "verified";
     const label = `${SOURCE_LABELS[kind](link)} (${sourceConfidenceHint(key, link)})`;
@@ -717,7 +729,7 @@ function sourceLinksHtml(row) {
   const links = row.links || {};
   const labels = { hf: "Hugging Face", github: "GitHub", homepage: "Homepage", paper: "Paper" };
   for (const key of ["hf", "github", "homepage", "paper"]) {
-    const link = links[key];
+    const link = key === "hf" ? resolvedHf(row) : links[key];
     if (!link || !link.url) continue;
     const hint = sourceConfidenceHint(key, link);
     const unverified = key === "hf" && link.confidence !== "verified";
@@ -730,9 +742,11 @@ function linkContentHtml(row) {
   const content = catalog.linkContent[row.model];
   if (!content) return "";
   const titles = { hf: "Hugging Face model card", github: "GitHub readme", homepage: "Homepage" };
+  const hfRepo = (resolvedHf(row) || {}).repo;
+  const contentFor = (key) => (key === "hf" ? (hfRepo && (content.hf || {})[hfRepo]) : content[key]);
   return ["hf", "github", "homepage"]
-    .filter((key) => content[key] && content[key].content)
-    .map((key) => `<details class="library-readme"><summary>${esc(titles[key])}</summary>${mdToHtml(content[key].content)}</details>`)
+    .filter((key) => contentFor(key) && contentFor(key).content)
+    .map((key) => `<details class="library-readme"><summary>${esc(titles[key])}</summary>${mdToHtml(contentFor(key).content)}</details>`)
     .join("");
 }
 

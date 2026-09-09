@@ -82,56 +82,108 @@ class TestDeduplication(unittest.TestCase):
         self.assertIn("code", by_ref["starcoder2:latest"]["signals"])
         self.assertIn("embedding", by_ref["nomic-embed-text:latest"]["signals"])
 
+    def test_release_field_present_and_quant_variants_share_it(self):
+        """Two K-quant tags of the same checkpoint must produce the same release key -- this is
+        the regression guard for the QUANT_SUFFIX two-segment (q5_K_M-style) bugfix."""
+        fp16 = model("llava:13b-v1.5-fp16", "sha256:a", tag="13b-v1.5-fp16")
+        kquant = model("llava:13b-v1.5-q5_K_M", "sha256:a", tag="13b-v1.5-q5_K_M")
+        compact = deduplicate_models([fp16, kquant])
+        self.assertEqual(compact[0]["release"], "llava:13b-v1.5")
+
+    def test_release_differs_for_different_sizes(self):
+        seven_b = model("llava:7b", "sha256:x", tag="7b")
+        thirteen_b = model("llava:13b", "sha256:y", tag="13b")
+        rows = deduplicate_models([seven_b, thirteen_b])
+        by_ref = {row["ref"]: row for row in rows}
+        self.assertEqual(by_ref["llava:7b"]["release"], "llava:7b")
+        self.assertEqual(by_ref["llava:13b"]["release"], "llava:13b")
+        self.assertNotEqual(by_ref["llava:7b"]["release"], by_ref["llava:13b"]["release"])
+
 
 class TestLinksExport(unittest.TestCase):
-    def test_digest_verified_beats_family_likely(self):
+    def test_digest_verified_beats_release_and_family_likely(self):
         hf_sources = {
             "by_digest": {"sha256:a": {"repo": "org/exact", "url": "https://huggingface.co/org/exact"}},
+            "by_release": {"demo:13b": {"repo": "org/release-guess", "url": "https://huggingface.co/org/release-guess", "method": "readme"}},
             "by_family": {"demo": {"repo": "org/guess", "url": "https://huggingface.co/org/guess", "method": "readme"}},
         }
-        links = resolve_links("sha256:a", "demo", hf_sources, None)
-        self.assertEqual(links["hf"]["confidence"], "verified")
-        self.assertEqual(links["hf"]["repo"], "org/exact")
+        links = resolve_links("sha256:a", "demo", "demo:13b", hf_sources, None)
+        self.assertEqual(links["hf"]["release"]["confidence"], "verified")
+        self.assertEqual(links["hf"]["release"]["repo"], "org/exact")
+        self.assertEqual(links["hf"]["family"]["confidence"], "verified")
+        self.assertEqual(links["hf"]["family"]["repo"], "org/exact")
 
-    def test_family_likely_used_when_digest_has_no_hit(self):
+    def test_release_likely_used_when_digest_has_no_hit(self):
         hf_sources = {
             "by_digest": {},
+            "by_release": {"demo:13b": {"repo": "org/release-guess", "url": "https://huggingface.co/org/release-guess", "method": "readme_verified"}},
+            "by_family": {"demo": {"repo": "org/family-guess", "url": "https://huggingface.co/org/family-guess", "method": "readme_verified"}},
+        }
+        links = resolve_links("sha256:b", "demo", "demo:13b", hf_sources, None)
+        self.assertEqual(links["hf"]["release"]["repo"], "org/release-guess")
+        self.assertEqual(links["hf"]["release"]["confidence"], "likely")
+
+    def test_release_and_family_hf_can_differ_and_both_survive(self):
+        """The core requirement: a release-specific pick never silently discards a differing
+        family-wide guess -- both are kept so a consumer can choose which to trust."""
+        hf_sources = {
+            "by_digest": {},
+            "by_release": {"llava:13b": {"repo": "liuhaotian/llava-v1.5-13b", "url": "https://huggingface.co/liuhaotian/llava-v1.5-13b", "method": "readme_verified"}},
+            "by_family": {"llava": {"repo": "liuhaotian/llava-v1.5-7b", "url": "https://huggingface.co/liuhaotian/llava-v1.5-7b", "method": "readme_verified"}},
+        }
+        links = resolve_links("sha256:c", "llava", "llava:13b", hf_sources, None)
+        self.assertEqual(links["hf"]["release"]["repo"], "liuhaotian/llava-v1.5-13b")
+        self.assertEqual(links["hf"]["family"]["repo"], "liuhaotian/llava-v1.5-7b")
+        self.assertNotEqual(links["hf"]["release"]["repo"], links["hf"]["family"]["repo"])
+
+    def test_family_likely_used_when_release_has_no_hit(self):
+        hf_sources = {
+            "by_digest": {},
+            "by_release": {},
             "by_family": {"demo": {"repo": "org/guess", "url": "https://huggingface.co/org/guess", "method": "readme_verified"}},
         }
-        links = resolve_links("sha256:b", "demo", hf_sources, None)
-        self.assertEqual(links["hf"]["confidence"], "likely")
-        self.assertEqual(links["hf"]["method"], "readme_verified")
+        links = resolve_links("sha256:b", "demo", "demo:13b", hf_sources, None)
+        self.assertIsNone(links["hf"]["release"])
+        self.assertEqual(links["hf"]["family"]["repo"], "org/guess")
+        self.assertEqual(links["hf"]["family"]["method"], "readme_verified")
 
     def test_links_fallback_hf_used_only_when_hf_source_has_nothing(self):
+        """scripts/links.py's fallback (github/homepage-content scan) is inherently
+        release-scoped -- it never produces a family-wide guess, so `family` stays null here
+        even though `release` resolves via the fallback."""
         links_data = {
             "by_family": {
                 "demo": {
-                    "hf": {"repo": "org/fallback", "url": "https://huggingface.co/org/fallback", "confidence": "likely", "method": "homepage_llm"},
+                    "hf_by_release": {"demo:13b": {"repo": "org/fallback", "url": "https://huggingface.co/org/fallback", "confidence": "likely", "method": "homepage_llm"}},
                     "github": {"repo": "org/demo", "url": "https://github.com/org/demo", "confidence": "likely", "method": "readme"},
                     "homepage": None,
                     "paper": None,
                 }
             }
         }
-        resolved = resolve_links("sha256:c", "demo", None, links_data)
-        self.assertEqual(resolved["hf"]["method"], "homepage_llm")
+        resolved = resolve_links("sha256:c", "demo", "demo:13b", None, links_data)
+        self.assertEqual(resolved["hf"]["release"]["method"], "homepage_llm")
+        self.assertEqual(resolved["hf"]["release"]["repo"], "org/fallback")
+        self.assertIsNone(resolved["hf"]["family"])
         self.assertEqual(resolved["github"]["repo"], "org/demo")
         self.assertIsNone(resolved["homepage"])
         self.assertIsNone(resolved["paper"])
 
     def test_no_links_at_all_is_all_none(self):
-        resolved = resolve_links("sha256:d", "demo", None, None)
-        self.assertEqual(resolved, {"hf": None, "github": None, "homepage": None, "paper": None})
+        resolved = resolve_links("sha256:d", "demo", "demo:13b", None, None)
+        self.assertEqual(resolved, {"hf": {"release": None, "family": None}, "github": None, "homepage": None, "paper": None})
 
     def test_compact_link_content_drops_paper_and_unknown_families(self):
         link_content = {
-            "demo": {"hf": {"url": "https://huggingface.co/org/demo", "content": "card text"}},
+            # hf content is keyed by repo (not release) -- multiple releases can share one repo.
+            "demo": {"hf": {"org/demo-7b": {"url": "https://huggingface.co/org/demo-7b", "content": "card text"}}},
             "other": {"github": {"url": "https://github.com/org/other", "content": "readme text"}},
         }
         out = compact_link_content(link_content, {"demo"})
         self.assertIn("demo", out)
         self.assertNotIn("other", out)
         self.assertNotIn("paper", out["demo"])
+        self.assertIn("org/demo-7b", out["demo"]["hf"])
 
     def test_compact_link_content_skips_empty_families(self):
         out = compact_link_content({"demo": {}}, {"demo"})
@@ -279,7 +331,11 @@ class TestProductionRegression(unittest.TestCase):
                 a = (Path(first) / name).read_bytes()
                 b = (Path(second) / name).read_bytes()
                 self.assertEqual(a, b)
-            self.assertLess((Path(first) / "models.json").stat().st_size, 7_000_000)
+            # Ceiling raised from 7MB: each row's links.hf now carries a {release, family}
+            # envelope (two link objects) instead of one flat object, plus a new "release"
+            # field -- a real, intentional size increase from the release-scoping change, not
+            # unbounded growth. Re-check this ceiling if it starts getting tight again.
+            self.assertLess((Path(first) / "models.json").stat().st_size, 9_000_000)
             quality = json.loads((Path(first) / "quality.json").read_text(encoding="utf-8"))
             self.assertIn("by_ref", quality)
             self.assertGreater(quality["quality_refs"], 0)

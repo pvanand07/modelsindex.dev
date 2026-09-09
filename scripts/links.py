@@ -1,27 +1,33 @@
 #!/usr/bin/env python3
 """Resolve homepage / GitHub / paper links per Ollama model family, fetch page content for all
-but paper, and (for families scripts/hf_source.py didn't already resolve) reuse that same
-content as one more chance at finding the Hugging Face repo.
+but paper, and (for releases scripts/hf_source.py didn't already resolve) reuse that same
+content as one more chance at finding a release-specific Hugging Face repo.
 
 Every link type comes from the same place: scripts/link_common.py:classify_readme_links()
 splits the family's ollama.com/library readme (already crawled by scripts/crawl.py into
 library.json) into huggingface / paper / homepage / github buckets. This script handles the
 three hf_source.py doesn't:
 
-- github / homepage: one readme-linked candidate is accepted directly (method "readme"); more
-  than one goes to an LLM to pick between them (link_common.llm_pick_url).
-- paper: a readme-linked arxiv.org link wins if there is one, else the first candidate. Never
-  fetched for content -- link only.
+- github / homepage: family-scoped -- one readme-linked candidate is accepted directly (method
+  "readme"); more than one goes to an LLM to pick between them (link_common.llm_pick_url). A
+  project has exactly one repo/site regardless of which size someone's asking about.
+- paper: family-scoped too. A readme-linked arxiv.org link wins if there is one, else the first
+  candidate. Never fetched for content -- link only.
 - github's README (via the GitHub API) and the homepage (via link_common.http_get, Exa as a
-  last resort for client-rendered pages) get their content fetched and saved. That content is
-  also scanned for an embedded huggingface.co link: for a family scripts/hf_source.py's tier
-  1/2 left unresolved, any Hugging Face repos turned up this way go to the LLM for a final pick
-  (link_common.llm_pick_repo), same as before -- but now as a side effect of content already
-  being fetched for its own sake, not a separate fetch pass that throws its findings away.
+  last resort for client-rendered pages) get their content fetched and saved once per family.
+  That content is also scanned for embedded huggingface.co links / bare org/repo tokens: for
+  each *release* (family + tag with the quant suffix stripped, link_common.release_key) that
+  scripts/hf_source.py's tiers left unresolved, the candidates found this way get a
+  deterministic size-token match when unambiguous, or an LLM pick
+  (link_common.llm_pick_repo, cached and deduped by size so releases sharing a size don't repeat
+  the call) when not -- a release-specific hf repo, not a single family-wide guess, as a side
+  effect of content already being fetched for its own sake.
 
 Content is saved once per family at data/link_content/<family>.json (not gitignored -- like
 data/hf_links/ before it, this is a durable record of what was actually fetched, not a
-rebuildable cache) and folded into prod/data/link_content.json by build_prod_data.py.
+rebuildable cache) and folded into prod/data/link_content.json by build_prod_data.py. hf content
+specifically is keyed by repo (not release) within that file, since multiple releases in a
+family can legitimately share one repo.
 
 Needs OPENROUTER_API_KEY + OPENROUTER_BASE_URL (github/homepage disambiguation and the HF pick),
 and optionally EXA_API_KEY (homepage fetch fallback for client-rendered pages) and GITHUB_TOKEN
@@ -30,6 +36,7 @@ root (link_common.load_dotenv()).
 
     python scripts/links.py --resolve                    # fill in every family, cache-first
     python scripts/links.py --resolve --limit 20          # pilot a sample
+    python scripts/links.py --resolve --families llava,wizardlm  # pilot specific families
     python scripts/links.py                                # rebuild data/out/links.json from cache only
 """
 from __future__ import annotations
@@ -62,7 +69,10 @@ from link_common import (  # noqa: E402
     llm_pick_repo,
     llm_pick_url,
     load_dotenv,
+    pick_candidate_for_release,
     read_json,
+    release_key,
+    size_token,
 )
 
 LINKS_OUT = DATA / "out" / "links.json"
@@ -154,10 +164,30 @@ def _content_path(family: str) -> Path:
 def write_content(family: str, kind: str, url: str, text: str) -> None:
     """Merge one link type's content into the family's durable content file. Families are each
     processed by a single worker thread, so different kinds for the same family never race.
+    `kind` is "github" or "homepage" here -- flat, one value per family, since a project has
+    exactly one repo/site regardless of which size someone's asking about. `hf` content is
+    keyed by repo instead (write_hf_content) since different releases in a family can resolve
+    to different Hugging Face repos.
     """
     path = _content_path(family)
     existing = read_json(path) if path.exists() else {}
     existing[kind] = {"url": url, "content": text[:CONTENT_MAX]}
+    atomic_write_json(path, existing)
+
+
+def write_hf_content(family: str, repo: str, url: str, text: str) -> None:
+    """Merge one Hugging Face repo's content into the family's content file, keyed by repo (not
+    release) -- multiple releases in a family legitimately share one repo, and content-fetching
+    is already cached per-repo (link_common.fetch_hf_readme), so this only ever writes a repo's
+    content once even if several releases pick it.
+    """
+    path = _content_path(family)
+    existing = read_json(path) if path.exists() else {}
+    hf_entry = existing.get("hf")
+    if not isinstance(hf_entry, dict) or any(not isinstance(v, dict) for v in hf_entry.values()):
+        hf_entry = {}  # migrate an old flat {"url","content"} shape (or absent) to repo-keyed
+    hf_entry[repo] = {"url": url, "content": text[:CONTENT_MAX]}
+    existing["hf"] = hf_entry
     atomic_write_json(path, existing)
 
 
@@ -182,24 +212,28 @@ def _scan_text_for_hf(text: str) -> list[str]:
 def resolve_family(
     family: str,
     meta: dict | None,
-    existing_hf: dict | None,
+    releases: list[str],
+    existing_hf_by_release: dict[str, dict],
     exa_api_key: str | None,
     llm_model: str,
     allow_network: bool = True,
 ) -> dict:
-    """existing_hf is whatever scripts/hf_source.py's tier 1/2 already resolved for this family
-    (verified hash match or a likely readme match), or None if it found nothing. Either way this
-    always (re)fetches and saves that repo's README content -- hf_source.py never persisted page
-    content, only the link. When existing_hf is None, github/homepage content already being
-    fetched for their own sake doubles as one more chance at finding an HF repo (cached per
-    family in RESOLVE_CACHE/<family>-hf.json so the LLM pick isn't repeated on every rerun).
+    """github/homepage/paper stay family-scoped (one project repo/site/paper regardless of
+    size). hf is release-scoped: `existing_hf_by_release` is whatever scripts/hf_source.py's
+    tiers already resolved per release (verified hash match or a likely readme/sibling match);
+    for any release with nothing there, the github-README/homepage content already being
+    fetched for its own sake doubles as one more chance -- picked deterministically by size
+    token when unambiguous, LLM-disambiguated (and cached, deduped by size so releases sharing
+    a size don't repeat the call) otherwise. Every resolved hf repo -- from hf_source.py or from
+    this fallback -- gets its own README content fetched and saved, keyed by repo.
     """
     readme = (meta or {}).get("readme") or ""
     description = (meta or {}).get("description") or ""
     _hf_readme_links, paper_links, homepage_links, github_repos = classify_readme_links(readme)
 
-    result: dict = {"github": None, "homepage": None, "paper": None, "hf": None}
+    result: dict = {"github": None, "homepage": None, "paper": None, "hf_by_release": {}}
     hf_candidates: list[dict] = []  # [{"repo", "source_url"}] gathered as a side effect below
+    need_fallback = any(release not in existing_hf_by_release for release in releases)
 
     gh_pick_cache = RESOLVE_CACHE / f"{family}-github.json"
     if gh_pick_cache.exists():
@@ -215,7 +249,7 @@ def resolve_family(
         content = fetch_github_readme(result["github"]["repo"], GITHUB_README_CACHE, allow_network)
         if content:
             write_content(family, "github", result["github"]["url"], content)
-            if existing_hf is None:
+            if need_fallback:
                 for repo in _scan_text_for_hf(content):
                     hf_candidates.append({"repo": repo, "source_url": result["github"]["url"]})
 
@@ -230,55 +264,89 @@ def resolve_family(
         fetched = fetch_homepage(result["homepage"]["url"], exa_api_key, allow_network)
         if fetched.get("text"):
             write_content(family, "homepage", result["homepage"]["url"], fetched["text"])
-        if existing_hf is None:
+        if need_fallback:
             for repo in find_hf_repos_in_links(fetched.get("links") or []):
                 hf_candidates.append({"repo": repo, "source_url": result["homepage"]["url"]})
 
     paper_url = _pick_paper(paper_links)
     result["paper"] = {"url": paper_url, "confidence": "likely", "method": "readme"} if paper_url else None
 
-    if existing_hf is not None:
-        result["hf"] = existing_hf
-    elif hf_candidates:
-        hf_pick_cache = RESOLVE_CACHE / f"{family}-hf.json"
-        if hf_pick_cache.exists():
-            result["hf"] = read_json(hf_pick_cache)
-        elif allow_network:
-            seen, deduped = set(), []
-            for c in hf_candidates:
-                if c["repo"] not in seen:
-                    seen.add(c["repo"])
-                    deduped.append(c)
-            picked = llm_pick_repo(family, description, deduped, llm_model)
+    if need_fallback and hf_candidates:
+        seen, fallback_candidates = set(), []
+        for c in hf_candidates:
+            if c["repo"] not in seen:
+                seen.add(c["repo"])
+                fallback_candidates.append(c)
+        candidate_repos = [c["repo"] for c in fallback_candidates]
+        for release in releases:
+            if release in existing_hf_by_release:
+                continue
+            tag_suffix = release.split(":", 1)[-1]
+            picked = _pick_fallback_repo(family, description, tag_suffix, fallback_candidates, candidate_repos, llm_model, allow_network)
             if picked:
-                method = "github_llm" if any(c["repo"] == picked and "github.com" in c["source_url"] for c in deduped) else "homepage_llm"
-                result["hf"] = {"repo": picked, "url": f"https://huggingface.co/{picked}", "confidence": "likely", "method": method}
-            atomic_write_json(hf_pick_cache, result["hf"])
+                method = "github_llm" if any(c["repo"] == picked and "github.com" in c["source_url"] for c in fallback_candidates) else "homepage_llm"
+                result["hf_by_release"][release] = {"repo": picked, "url": f"https://huggingface.co/{picked}", "confidence": "likely", "method": method}
 
-    if result["hf"]:
-        content = fetch_hf_readme(result["hf"]["repo"], HF_README_CACHE, allow_network)
+    # Content: fetch+save every distinct hf repo this family ended up with, from either source.
+    distinct_repos = {hit["repo"] for hit in existing_hf_by_release.values()} | {hit["repo"] for hit in result["hf_by_release"].values()}
+    for repo in distinct_repos:
+        content = fetch_hf_readme(repo, HF_README_CACHE, allow_network)
         if content:
-            write_content(family, "hf", result["hf"]["url"], content)
+            write_hf_content(family, repo, f"https://huggingface.co/{repo}", content)
 
     return result
 
 
+def _pick_fallback_repo(
+    family: str, description: str, tag_suffix: str, candidates_with_source: list[dict],
+    candidate_repos: list[str], llm_model: str, allow_network: bool,
+) -> str | None:
+    """Deterministic size-token match first (free, no cache needed); LLM disambiguation only
+    when ambiguous, cached and deduped by (family, size-token) same as hf_source.py's release
+    picking, so releases sharing a size don't repeat the LLM call.
+    """
+    repo, ambiguous = pick_candidate_for_release(tag_suffix, candidate_repos)
+    if not ambiguous:
+        return repo
+    if not allow_network:
+        return None
+
+    dedup_key = size_token(tag_suffix) or tag_suffix
+    cache_path = RESOLVE_CACHE / f"{family}-hf-{dedup_key}.json"
+    if cache_path.exists():
+        return read_json(cache_path)
+
+    picked = llm_pick_repo(family, description, candidates_with_source, llm_model, release_hint=tag_suffix)
+    atomic_write_json(cache_path, picked)
+    return picked
+
+
 # ------------------------------------------------------------------------------------------- main
-def _existing_hf_by_family(models: list[dict], hf_sources: dict) -> dict[str, dict]:
-    """What scripts/hf_source.py already resolved, keyed by family: a digest-level verified hit
-    (preferred) or a family-level likely hit, matching build_prod_data.resolve_hf_source's
-    precedence (verified always wins).
+def _releases_by_family(models: list[dict]) -> dict[str, list[str]]:
+    out: dict[str, set[str]] = {}
+    for m in models:
+        out.setdefault(m["model"], set()).add(release_key(m["model"], m["tag"]))
+    return {fam: sorted(releases) for fam, releases in out.items()}
+
+
+def _existing_hf_by_release(models: list[dict], hf_sources: dict) -> dict[str, dict[str, dict]]:
+    """What scripts/hf_source.py already resolved, keyed by family -> {release: hit}. A
+    digest-level verified hit (release-exact by construction) beats a release-level likely hit,
+    matching build_prod_data.resolve_links's precedence (verified always wins). Families/
+    releases with nothing here are exactly the ones this module's fallback should attempt.
     """
     by_digest = hf_sources.get("by_digest") or {}
-    by_family = hf_sources.get("by_family") or {}
-    out: dict[str, dict] = {}
+    by_release = hf_sources.get("by_release") or {}
+    out: dict[str, dict[str, dict]] = {}
     for m in models:
+        fam, release = m["model"], release_key(m["model"], m["tag"])
         hit = by_digest.get(m["digest"])
-        if hit and m.get("model") not in out:
-            out[m["model"]] = {"repo": hit["repo"], "url": hit["url"], "confidence": "verified"}
-    for fam, hit in by_family.items():
-        if fam not in out:
-            out[fam] = {"repo": hit["repo"], "url": hit["url"], "confidence": "likely", "method": hit.get("method", "readme")}
+        if hit:
+            out.setdefault(fam, {})[release] = {"repo": hit["repo"], "url": hit["url"], "confidence": "verified"}
+    for release, hit in by_release.items():
+        fam = release.split(":", 1)[0]
+        if release not in out.get(fam, {}):
+            out.setdefault(fam, {})[release] = {"repo": hit["repo"], "url": hit["url"], "confidence": "likely", "method": hit.get("method", "readme")}
     return out
 
 
@@ -288,6 +356,7 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--limit", type=int, help="cap how many families to process this run (for a pilot)")
     ap.add_argument("--workers", type=int, default=3, help="parallel fetches/LLM calls (be polite)")
     ap.add_argument("--llm-model", default=DEFAULT_LLM_MODEL)
+    ap.add_argument("--families", help="comma-separated family names to restrict this run to (pilot targeting)")
     a = ap.parse_args(argv)
 
     load_dotenv()
@@ -297,9 +366,11 @@ def main(argv: list[str] | None = None) -> int:
     models = json.loads(models_path.read_text(encoding="utf-8"))["models"] if models_path.exists() else []
     hf_sources_path = ROOT / "data/out/hf_sources.json"
     hf_sources = json.loads(hf_sources_path.read_text(encoding="utf-8")) if hf_sources_path.exists() else {}
-    existing_hf = _existing_hf_by_family(models, hf_sources)
+    existing_hf = _existing_hf_by_release(models, hf_sources)
+    releases_by_family = _releases_by_family(models)
 
-    families = sorted(library.keys())
+    families_filter = set(a.families.split(",")) if a.families else None
+    families = sorted(f for f in library if not families_filter or f in families_filter)
     if a.limit:
         families = families[: a.limit]
 
@@ -309,26 +380,37 @@ def main(argv: list[str] | None = None) -> int:
     print(f"[links] {'resolving' if a.resolve else 'rebuilding from cache'} {len(families)} families, {a.workers} workers", flush=True)
     with ThreadPoolExecutor(max_workers=max(1, a.workers)) as ex:
         futs = {
-            ex.submit(resolve_family, fam, library.get(fam), existing_hf.get(fam), exa_api_key, a.llm_model, a.resolve): fam
+            ex.submit(
+                resolve_family, fam, library.get(fam), releases_by_family.get(fam, []),
+                existing_hf.get(fam, {}), exa_api_key, a.llm_model, a.resolve,
+            ): fam
             for fam in families
         }
         done = 0
         for fut in as_completed(futs):
             fam = futs[fut]
             result = fut.result()
-            if any(result.values()):
+            if result["github"] or result["homepage"] or result["paper"] or result["hf_by_release"]:
                 by_family[fam] = result
             done += 1
             if done % 20 == 0:
                 print(f"[links] {done}/{len(families)}", flush=True)
 
+    # --families or --limit only touch a subset of families -- merge into whatever's already on
+    # disk for every other family rather than replacing the whole file, or a pilot/partial run
+    # would silently wipe out every previously-resolved family.
+    processed = set(families)
+    prior_by_family = json.loads(LINKS_OUT.read_text(encoding="utf-8")).get("by_family", {}) if LINKS_OUT.exists() else {}
+    merged_by_family = {**{f: v for f, v in prior_by_family.items() if f not in processed}, **by_family}
+
     LINKS_OUT.parent.mkdir(parents=True, exist_ok=True)
     LINKS_OUT.write_text(
-        json.dumps({"schema_version": 1, "family_count": len(by_family), "by_family": by_family}, indent=2),
+        json.dumps({"schema_version": 2, "family_count": len(merged_by_family), "by_family": merged_by_family}, indent=2),
         encoding="utf-8",
     )
-    counts = {k: sum(1 for v in by_family.values() if v.get(k)) for k in ("hf", "github", "homepage", "paper")}
-    print(f"[links] families resolved={len(by_family)} {counts} -> {LINKS_OUT}", flush=True)
+    counts = {k: sum(1 for v in merged_by_family.values() if v.get(k)) for k in ("github", "homepage", "paper")}
+    counts["hf_releases"] = sum(len(v.get("hf_by_release") or {}) for v in merged_by_family.values())
+    print(f"[links] families resolved={len(merged_by_family)} {counts} -> {LINKS_OUT}", flush=True)
     return 0
 
 

@@ -28,6 +28,66 @@ DATA = Path(os.environ.get("MODELINDEX_DATA", str(ROOT / "data")))
 DEFAULT_LLM_MODEL = "~z-ai/glm-flash-latest"
 CONTENT_MAX = 100_000  # matches crawl.py's README_MAX cap on the Ollama library readme
 
+# A trailing quant token on an Ollama tag -- e.g. "-q4_K_M", "-fp16". `{0,2}` (not `?`) because
+# K-quants need two trailing segments ("_K" then "_M"/"_L"/"_S"): "q4_K_M" is q4 + "_K" + "_M".
+# An earlier single-segment version of this regex silently failed to strip any K-quant at all.
+QUANT_SUFFIX = re.compile(
+    r"(?:^|[-_:])(?:f16|fp16|bf16|q\d(?:_[a-z0-9]+){0,2}|iq\d(?:_[a-z0-9]+)?|mxfp\d)$",
+    re.IGNORECASE,
+)
+
+
+_SIZE_TOKEN = re.compile(r"\d+(?:\.\d+)?x?\d*[bB]\b")
+
+
+def size_token(tag_suffix: str) -> str | None:
+    """A size-shaped token from a tag/release suffix (`13b`, `8x7b`, `1.5b`), lowercased -- used
+    to disambiguate between candidate repos, not to compute a real parameter count.
+    """
+    m = _SIZE_TOKEN.search(tag_suffix or "")
+    return m.group(0).lower() if m else None
+
+
+def pick_candidate_for_release(release_tag_suffix: str, candidates: list[str]) -> tuple[str | None, bool]:
+    """Deterministic size-token match against candidate repo *names*. Returns (repo, ambiguous)
+    -- ambiguous=True means the caller should fall back to an LLM pick (or leave unresolved).
+    Shared by scripts/hf_source.py (readme/sibling candidates) and scripts/links.py (homepage/
+    GitHub-scan candidates) -- same matching problem, two different candidate sources.
+    """
+    if not candidates:
+        return None, False
+    size = size_token(release_tag_suffix)
+    if len(candidates) == 1:
+        candidate = candidates[0]
+        # A lone candidate is only a free pass when there's no size to check, or it matches --
+        # a single candidate scraped from arbitrary readme/changelog text (an old preview
+        # release mentioned in passing, say) is not automatically "the" answer for every size in
+        # the family just because nothing else turned up. Confirmed live: llava's github readme
+        # mentions exactly one HF link in its changelog section (LLaVA-Lightning-MPT-7B-preview)
+        # that isn't the actual repo for any of llava's real 7b/13b/34b releases -- accepting a
+        # lone mismatched-size candidate stamped it onto llava:13b as a false match.
+        if not size or size in candidate.split("/", 1)[-1].lower():
+            return candidate, False
+        return None, True
+    if size:
+        matches = [c for c in candidates if size in c.split("/", 1)[-1].lower()]
+        if len(matches) == 1:
+            return matches[0], False
+    return None, True
+
+
+def release_key(family: str, tag: str) -> str:
+    """`family:tag` with any trailing quant token stripped.
+
+    Two tags that differ only by quant (`13b-v1.5-fp16` vs `13b-v1.5-q5_K_M`) share one release;
+    two tags that differ by base model or size (`13b-llama2-q4_0` vs `13b-q4_0`, or `7b` vs
+    `13b`) do not -- this is deliberately a pure string operation (no numeric size parsing, no
+    dependency on scripts/quality.py's separate and looser `_SIZE_B` regex) so it never has to
+    guess at a MoE tag's total parameter count.
+    """
+    stripped = QUANT_SUFFIX.sub("", tag or "") or tag
+    return f"{family}:{stripped}"
+
 try:
     import hrequests
     HAVE_HREQUESTS = True
@@ -76,6 +136,19 @@ _GITHUB_BAD_PATH = ("issues", "pull", "blob", "tree", "wiki", "actions", "releas
 _GITHUB_BAD_ORG = ("orgs", "sponsors", "marketplace", "topics", "features", "about", "pricing")
 
 
+_REPO_SEGMENT = re.compile(r"[A-Za-z0-9_.\-]+")
+
+
+def _sanitize_repo_segment(part: str) -> str:
+    """Truncate at the first character that can't appear in an org/repo name -- a loosely
+    written source regex (`\\S+`, embedded-HTML scans) can pull in a trailing quote/angle
+    bracket from surrounding markup (`<a href="...naveraven-v2-13b">`); without this, that
+    stray character rides along into a cache filename and breaks on Windows (illegal char).
+    """
+    m = _REPO_SEGMENT.match(part)
+    return m.group(0) if m else ""
+
+
 def clean_hf_repo(url: str) -> str | None:
     path = url.split("huggingface.co/", 1)[-1].split("?")[0].split("#")[0]
     if any(path.startswith(p) for p in _HF_BAD_PREFIX):
@@ -88,7 +161,10 @@ def clean_hf_repo(url: str) -> str | None:
             parts = parts[: parts.index(stop)]
     if len(parts) < 2:
         return None
-    return f"{parts[0]}/{parts[1]}"
+    org, name = _sanitize_repo_segment(parts[0]), _sanitize_repo_segment(parts[1])
+    if not org or not name:
+        return None
+    return f"{org}/{name}"
 
 
 def clean_github_repo(url: str) -> str | None:
@@ -103,7 +179,10 @@ def clean_github_repo(url: str) -> str | None:
             parts = parts[: parts.index(stop)]
     if len(parts) < 2:
         return None
-    return f"{parts[0]}/{parts[1]}"
+    org, name = _sanitize_repo_segment(parts[0]), _sanitize_repo_segment(parts[1])
+    if not org or not name:
+        return None
+    return f"{org}/{name}"
 
 
 def classify_readme_links(readme: str) -> tuple[list[str], list[str], list[str], list[str]]:
@@ -164,10 +243,16 @@ def openrouter_chat(prompt: str, model: str, api_key: str, base_url: str) -> str
     return (data["choices"][0]["message"].get("content") or "").strip()
 
 
-def llm_pick_repo(family: str, description: str, candidates: list[dict], model: str) -> str | None:
+def llm_pick_repo(
+    family: str, description: str, candidates: list[dict], model: str, release_hint: str | None = None,
+) -> str | None:
     """Ask the LLM which candidate repo (if any) is the correct match for this model family.
 
     candidates: [{"repo": "org/name", "source_url": "...", "snippet": "..."}, ...]
+    `release_hint` is the specific release's tag suffix (e.g. "13b-v1.5") when the pick is for
+    one release within a family that has several (not every candidate necessarily matches --
+    without this, the LLM has no way to know it should decline a same-family-wrong-size
+    candidate rather than pick one anyway).
     """
     if not candidates:
         return None
@@ -182,12 +267,16 @@ def llm_pick_repo(family: str, description: str, candidates: list[dict], model: 
         + ")"
         for c in candidates
     )
+    release_line = f'Specific release/size to match: "{release_hint}"\n' if release_hint else ""
     prompt = (
         f'Ollama model family: "{family}"\n'
+        f"{release_line}"
         f"Description: {description or '(none)'}\n\n"
         f"Candidate Hugging Face repositories found while researching this model:\n{listing}\n\n"
-        "Which one, if any, is the correct upstream Hugging Face repository for this exact model? "
-        "Reply with ONLY the repo in org/repo format, or reply NONE if none of them match."
+        "Which one, if any, is the correct upstream Hugging Face repository for this exact "
+        + (f"release/size ({release_hint})? " if release_hint else "model? ")
+        + "Reply with ONLY the repo in org/repo format, or reply NONE if none of them match "
+        + ("this specific release/size." if release_hint else "the model.")
     )
     try:
         reply = openrouter_chat(prompt, model, api_key, base_url)

@@ -21,8 +21,12 @@ from link_common import (  # noqa: E402  # pylint: disable=import-error
     find_github_repos_in_links,
     find_hf_repos_in_links,
     html_to_text,
+    pick_candidate_for_release,
+    release_key,
+    size_token,
 )
-from links import _existing_hf_by_family, _pick_paper, _scan_text_for_hf  # noqa: E402  # pylint: disable=import-error
+from links import _existing_hf_by_release, _pick_paper, _scan_text_for_hf  # noqa: E402  # pylint: disable=import-error
+from hf_source import extract_readme_candidates, sibling_candidates  # noqa: E402  # pylint: disable=import-error
 
 
 class TestCleanRepo(unittest.TestCase):
@@ -42,6 +46,17 @@ class TestCleanRepo(unittest.TestCase):
     def test_clean_github_repo_rejects_org_pages(self):
         self.assertIsNone(clean_github_repo("https://github.com/orgs/org/repositories"))
         self.assertIsNone(clean_github_repo("https://github.com/pricing"))
+
+    def test_clean_hf_repo_strips_trailing_quote_from_embedded_html(self):
+        # A loose \S+-style URL scan over raw HTML (e.g. <a href="...url">) can pull in the
+        # closing quote as part of the match -- confirmed live in nexusraven's GitHub readme,
+        # which crashed scripts/links.py by writing an illegal Windows filename.
+        self.assertEqual(
+            clean_hf_repo('https://huggingface.co/Nexusflow/NexusRaven-V2-13B"'), "Nexusflow/NexusRaven-V2-13B"
+        )
+
+    def test_clean_github_repo_strips_trailing_html_junk(self):
+        self.assertEqual(clean_github_repo('https://github.com/org/repo">'), "org/repo")
 
 
 class TestClassifyReadmeLinks(unittest.TestCase):
@@ -130,27 +145,159 @@ class TestScanTextForHf(unittest.TestCase):
         self.assertEqual(_scan_text_for_hf("nothing here"), [])
 
 
-class TestExistingHfByFamily(unittest.TestCase):
-    def test_verified_digest_wins_over_family_likely(self):
-        models = [{"digest": "sha256:a", "model": "demo"}]
+class TestExistingHfByRelease(unittest.TestCase):
+    def test_verified_digest_wins_over_release_likely(self):
+        models = [{"digest": "sha256:a", "model": "demo", "tag": "13b"}]
         hf_sources = {
             "by_digest": {"sha256:a": {"repo": "org/exact", "url": "https://huggingface.co/org/exact"}},
-            "by_family": {"demo": {"repo": "org/guess", "url": "https://huggingface.co/org/guess", "method": "readme"}},
+            "by_release": {"demo:13b": {"repo": "org/guess", "url": "https://huggingface.co/org/guess", "method": "readme"}},
         }
-        out = _existing_hf_by_family(models, hf_sources)
-        self.assertEqual(out["demo"]["confidence"], "verified")
-        self.assertEqual(out["demo"]["repo"], "org/exact")
+        out = _existing_hf_by_release(models, hf_sources)
+        self.assertEqual(out["demo"]["demo:13b"]["confidence"], "verified")
+        self.assertEqual(out["demo"]["demo:13b"]["repo"], "org/exact")
 
-    def test_family_only_hit_is_likely(self):
-        models = [{"digest": "sha256:a", "model": "demo"}]
-        hf_sources = {"by_digest": {}, "by_family": {"demo": {"repo": "org/guess", "url": "https://huggingface.co/org/guess", "method": "readme"}}}
-        out = _existing_hf_by_family(models, hf_sources)
-        self.assertEqual(out["demo"]["confidence"], "likely")
+    def test_release_only_hit_is_likely(self):
+        models = [{"digest": "sha256:a", "model": "demo", "tag": "13b"}]
+        hf_sources = {"by_digest": {}, "by_release": {"demo:13b": {"repo": "org/guess", "url": "https://huggingface.co/org/guess", "method": "readme"}}}
+        out = _existing_hf_by_release(models, hf_sources)
+        self.assertEqual(out["demo"]["demo:13b"]["confidence"], "likely")
 
-    def test_unresolved_family_is_absent(self):
-        models = [{"digest": "sha256:a", "model": "demo"}]
-        out = _existing_hf_by_family(models, {})
+    def test_unresolved_release_is_absent(self):
+        models = [{"digest": "sha256:a", "model": "demo", "tag": "13b"}]
+        out = _existing_hf_by_release(models, {})
         self.assertNotIn("demo", out)
+
+    def test_different_releases_in_one_family_kept_separate(self):
+        models = [
+            {"digest": "sha256:a", "model": "llava", "tag": "7b"},
+            {"digest": "sha256:b", "model": "llava", "tag": "13b"},
+        ]
+        hf_sources = {
+            "by_digest": {},
+            "by_release": {
+                "llava:7b": {"repo": "liuhaotian/llava-v1.5-7b", "url": "https://huggingface.co/liuhaotian/llava-v1.5-7b", "method": "readme"},
+                "llava:13b": {"repo": "liuhaotian/llava-v1.5-13b", "url": "https://huggingface.co/liuhaotian/llava-v1.5-13b", "method": "readme"},
+            },
+        }
+        out = _existing_hf_by_release(models, hf_sources)
+        self.assertEqual(out["llava"]["llava:7b"]["repo"], "liuhaotian/llava-v1.5-7b")
+        self.assertEqual(out["llava"]["llava:13b"]["repo"], "liuhaotian/llava-v1.5-13b")
+
+
+class TestReleaseKey(unittest.TestCase):
+    def test_quant_only_variants_merge(self):
+        self.assertEqual(release_key("llava", "13b-v1.5-fp16"), release_key("llava", "13b-v1.5-q5_K_M"))
+
+    def test_base_model_qualifier_kept_apart_despite_same_size(self):
+        self.assertNotEqual(release_key("wizardlm", "13b-llama2-q4_0"), release_key("wizardlm", "13b-q4_0"))
+        self.assertEqual(release_key("wizardlm", "13b-llama2-q4_0"), "wizardlm:13b-llama2")
+        self.assertEqual(release_key("wizardlm", "13b-q4_0"), "wizardlm:13b")
+
+    def test_moe_active_param_suffix_survives(self):
+        self.assertEqual(release_key("qwen3", "235b-a22b-instruct-2507-q4_K_M"), "qwen3:235b-a22b-instruct-2507")
+
+    def test_no_quant_token_unchanged(self):
+        self.assertEqual(release_key("codellama", "latest"), "codellama:latest")
+
+    def test_different_sizes_differ(self):
+        self.assertNotEqual(release_key("llava", "7b"), release_key("llava", "13b"))
+
+
+class TestExtractReadmeCandidates(unittest.TestCase):
+    def test_returns_all_links_not_just_first(self):
+        readme = (
+            "[Hugging Face](https://huggingface.co/org/model-7b) "
+            "and also [here](https://huggingface.co/org/model-13b)"
+        )
+        candidates = extract_readme_candidates(readme)
+        self.assertEqual(candidates, ["org/model-7b", "org/model-13b"])
+
+    def test_labeled_link_sorts_first(self):
+        readme = (
+            "[some other link](https://huggingface.co/org/unrelated) "
+            "[Hugging Face](https://huggingface.co/org/the-real-one)"
+        )
+        self.assertEqual(extract_readme_candidates(readme)[0], "org/the-real-one")
+
+    def test_no_links_is_empty(self):
+        self.assertEqual(extract_readme_candidates(""), [])
+
+
+class TestSiblingCandidates(unittest.TestCase):
+    def test_finds_family_slug_matching_bare_tokens(self):
+        text = (
+            "Run it with:\n"
+            "```bash\n"
+            "python -m llava.serve.cli --model-path liuhaotian/llava-v1.5-13b\n"
+            "```\n"
+            "See also the unrelated other-project/other-model repo and images/llava_logo.png."
+        )
+        candidates = sibling_candidates("llava", [text])
+        self.assertIn("liuhaotian/llava-v1.5-13b", candidates)
+        self.assertNotIn("other-project/other-model", candidates)
+
+    def test_rejects_file_extensions(self):
+        text = "See docs/llava_architecture.png for the diagram."
+        self.assertEqual(sibling_candidates("llava", [text]), [])
+
+    def test_empty_family_yields_nothing(self):
+        self.assertEqual(sibling_candidates("", ["org/repo-13b"]), [])
+
+
+class TestPickCandidateForRelease(unittest.TestCase):
+    def test_single_candidate_is_free_pass_when_no_size_to_check(self):
+        repo, ambiguous = pick_candidate_for_release("latest", ["org/only-one"])
+        self.assertEqual(repo, "org/only-one")
+        self.assertFalse(ambiguous)
+
+    def test_single_candidate_matching_size_is_free_pass(self):
+        repo, ambiguous = pick_candidate_for_release("13b", ["org/model-13b"])
+        self.assertEqual(repo, "org/model-13b")
+        self.assertFalse(ambiguous)
+
+    def test_single_candidate_with_mismatched_size_is_ambiguous(self):
+        # Regression: a lone candidate scraped from arbitrary readme/changelog text (e.g. an old
+        # preview release mentioned in passing) must not be blindly stamped onto every release
+        # just because it's the only thing found -- confirmed live: llava's github readme
+        # mentions exactly one bare HF link (a 7B preview build) that isn't the repo for
+        # llava:13b, and an earlier version of this free-passed it anyway.
+        repo, ambiguous = pick_candidate_for_release("13b", ["liuhaotian/LLaVA-Lightning-MPT-7B-preview"])
+        self.assertIsNone(repo)
+        self.assertTrue(ambiguous)
+
+    def test_unique_size_match_is_deterministic(self):
+        candidates = ["liuhaotian/llava-v1.5-7b", "liuhaotian/llava-v1.5-13b", "liuhaotian/llava-v1.6-34b"]
+        repo, ambiguous = pick_candidate_for_release("13b", candidates)
+        self.assertEqual(repo, "liuhaotian/llava-v1.5-13b")
+        self.assertFalse(ambiguous)
+
+    def test_multiple_size_matches_are_ambiguous(self):
+        candidates = ["liuhaotian/llava-v1.5-7b", "llava-hf/llava-1.5-7b-hf"]
+        repo, ambiguous = pick_candidate_for_release("7b", candidates)
+        self.assertIsNone(repo)
+        self.assertTrue(ambiguous)
+
+    def test_no_size_token_with_multiple_candidates_is_ambiguous(self):
+        candidates = ["org/a", "org/b"]
+        repo, ambiguous = pick_candidate_for_release("latest", candidates)
+        self.assertIsNone(repo)
+        self.assertTrue(ambiguous)
+
+    def test_no_candidates_is_not_ambiguous(self):
+        repo, ambiguous = pick_candidate_for_release("13b", [])
+        self.assertIsNone(repo)
+        self.assertFalse(ambiguous)
+
+
+class TestSizeToken(unittest.TestCase):
+    def test_extracts_leading_size(self):
+        self.assertEqual(size_token("13b-v1.5-fp16"), "13b")
+
+    def test_extracts_moe_notation(self):
+        self.assertEqual(size_token("8x22b-fp16"), "8x22b")
+
+    def test_no_size_token_is_none(self):
+        self.assertIsNone(size_token("latest"))
 
 
 if __name__ == "__main__":

@@ -9,18 +9,14 @@ from __future__ import annotations
 
 import argparse
 import json
-import re
 from collections import defaultdict
 from pathlib import Path
 
 from build_index import gpu_constants
 from gguf_header import normalize_quant
+from link_common import QUANT_SUFFIX, release_key
 
 SCHEMA_VERSION = 2
-QUANT_SUFFIX = re.compile(
-    r"(?:^|[-_:])(?:f16|fp16|q\d(?:_[a-z0-9]+)?|iq\d(?:_[a-z0-9]+)?)$",
-    re.IGNORECASE,
-)
 CODE_HINTS = (
     "code", "coder", "codellama", "starcoder", "codegemma", "deepseek-coder",
     "devstral", "magicoder", "phind", "sqlcoder",
@@ -65,31 +61,49 @@ def capability_signals(model: dict) -> list[str]:
     return signals
 
 
-def resolve_links(digest: str, family: str, hf_sources: dict | None, links: dict | None) -> dict:
+def _shape_hit(hit: dict | None, confidence: str) -> dict | None:
+    if not hit:
+        return None
+    shaped = {"repo": hit["repo"], "url": hit["url"], "confidence": confidence}
+    if confidence != "verified":
+        shaped["method"] = hit.get("method", "readme")
+    return shaped
+
+
+def resolve_links(digest: str, family: str, release: str, hf_sources: dict | None, links: dict | None) -> dict:
     """The four provenance links for one model row.
 
-    `hf` is resolved with the same precedence scripts/hf_source.py has always used -- a
-    digest-level hash match (`verified`) beats a family-level readme match (`likely`), because
-    byte-identity is necessarily per-file (quant-specific), not per-family. Falls further back to
-    whatever scripts/links.py found via the family's homepage/GitHub content (also `likely`) when
-    hf_source.py's tiers found nothing at all for this family. `github`/`homepage`/`paper` have
-    no finer grain than family to fall back on -- every quant of a family shares one project.
+    `hf` is release-scoped: a family can bundle genuinely different upstream releases at
+    different sizes (llava:7b and llava:13b are different Vicuna checkpoints entirely), so a
+    single family-wide "likely" pick is not safe to stamp onto every size. `release` (family +
+    tag with the quant suffix stripped, scripts/link_common.py:release_key) is the precise key;
+    `family` is kept alongside it as a same-shaped fallback/context value, never silently
+    dropped -- a caller (the web UI) prefers `release` when present and falls back to `family`
+    (labeled as not size-confirmed) otherwise. A digest-level hash match (`verified`) is
+    necessarily release-exact (one digest = one file), so it fills both slots identically.
+    `github`/`homepage`/`paper` have no finer grain than family -- every quant *and every size*
+    of a family shares one project repo/site/paper.
     """
     hf_sources = hf_sources or {}
-    hit = (hf_sources.get("by_digest") or {}).get(digest)
-    if hit:
-        hf = {"repo": hit["repo"], "url": hit["url"], "confidence": "verified"}
-    else:
-        hit = (hf_sources.get("by_family") or {}).get(family)
-        hf = (
-            {"repo": hit["repo"], "url": hit["url"], "confidence": "likely", "method": hit.get("method", "readme")}
-            if hit else None
-        )
+    digest_hit = _shape_hit((hf_sources.get("by_digest") or {}).get(digest), "verified")
+    release_hit = _shape_hit((hf_sources.get("by_release") or {}).get(release), "likely")
+    family_hit = _shape_hit((hf_sources.get("by_family") or {}).get(family), "likely")
 
     fam_links = ((links or {}).get("by_family") or {}).get(family) or {}
-    if not hf:
-        hf = fam_links.get("hf")
-    return {"hf": hf, "github": fam_links.get("github"), "homepage": fam_links.get("homepage"), "paper": fam_links.get("paper")}
+    # scripts/links.py's fallback (github/homepage-content scan) is inherently release-scoped --
+    # it never produces a family-wide guess, only per-release picks -- so there is no equivalent
+    # fallback source for the `family` slot beyond hf_source.py's own by_family.
+    fallback_release_hit = _shape_hit((fam_links.get("hf_by_release") or {}).get(release), "likely")
+
+    return {
+        "hf": {
+            "release": digest_hit or release_hit or fallback_release_hit,
+            "family": digest_hit or family_hit,
+        },
+        "github": fam_links.get("github"),
+        "homepage": fam_links.get("homepage"),
+        "paper": fam_links.get("paper"),
+    }
 
 
 def compact_model(
@@ -99,6 +113,7 @@ def compact_model(
     hf_sources: dict | None = None,
     links: dict | None = None,
 ) -> dict:
+    release = release_key(primary.get("model") or "", primary.get("tag") or "")
     return {
         "ref": primary["ref"],
         "aliases": sorted(a for a in aliases if a != primary["ref"]),
@@ -129,7 +144,8 @@ def compact_model(
         "pushed_at": pushed_at or primary.get("pushed_at"),
         "description": (primary.get("description") or "").strip(),
         "signals": capability_signals(primary),
-        "links": resolve_links(primary["digest"], primary.get("model") or "", hf_sources, links),
+        "release": release,
+        "links": resolve_links(primary["digest"], primary.get("model") or "", release, hf_sources, links),
     }
 
 
@@ -383,7 +399,16 @@ def main(argv=None) -> int:
         (out_dir / name).stat().st_size
         for name in ("manifest.json", "gpus.json", "models.json", "library.json", "quality.json", "link_content.json")
     )
-    link_counts = {k: sum(1 for m in catalog["models"] if (m.get("links") or {}).get(k)) for k in ("hf", "github", "homepage", "paper")}
+    hf_release_hits = sum(1 for m in catalog["models"] if ((m.get("links") or {}).get("hf") or {}).get("release"))
+    hf_family_only_hits = sum(
+        1 for m in catalog["models"]
+        if not ((m.get("links") or {}).get("hf") or {}).get("release") and ((m.get("links") or {}).get("hf") or {}).get("family")
+    )
+    link_counts = {
+        "hf_release": hf_release_hits,
+        "hf_family_only": hf_family_only_hits,
+        **{k: sum(1 for m in catalog["models"] if (m.get("links") or {}).get(k)) for k in ("github", "homepage", "paper")},
+    }
     print(
         f"[prod] {manifest['unique_models']} unique models, {manifest['gpu_count']} GPUs, "
         f"{len(library_out['families'])} library pages, {manifest['quality_refs']} quality refs, "
