@@ -1,0 +1,17 @@
+{
+  "schema_version": 2,
+  "generated": "2026-09-08T21:37:50+00:00",
+  "source": "seed",
+  "factors": {
+    "F16": 1.0,
+    "Q8_0": 0.97,
+    "Q6_K": 0.94,
+    "Q5_K_M": 0.92,
+    "Q4_K_M": 0.9,
+    "Q4_0": 0.82,
+    "Q3_K_M": 0.72,
+    "Q2_K": 0.55
+  },
+  "default": 0.67,
+  "notes": "Q_file = Q_base * F(quant). Replace with fit.py quant factors when calibrated."
+}

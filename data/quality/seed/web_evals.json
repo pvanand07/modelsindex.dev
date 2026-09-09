@@ -1,0 +1,700 @@
+{
+  "schema_version": 1,
+  "notes": "Curated web/HF benchmark rows. Prefer HF when vendors disagree; note conflicts in references.",
+  "subjects": [
+    {
+      "eval_id": "deepseek-r1:1.5b-qwen-distill",
+      "family": "deepseek-r1",
+      "size_b": 1.5,
+      "variant": "distill",
+      "benchmarks": {
+        "aime24": 28.9,
+        "math500": 83.9,
+        "gpqa_diamond": 33.8,
+        "livecodebench": 16.9
+      },
+      "reference_ids": [
+        "ref-deepseek-r1-distill-32b"
+      ]
+    },
+    {
+      "eval_id": "deepseek-r1:14b-qwen-distill",
+      "family": "deepseek-r1",
+      "size_b": 14,
+      "variant": "distill",
+      "benchmarks": {
+        "aime24": 69.7,
+        "math500": 93.9,
+        "gpqa_diamond": 59.1,
+        "livecodebench": 53.1
+      },
+      "reference_ids": [
+        "ref-deepseek-r1-distill-32b"
+      ]
+    },
+    {
+      "eval_id": "deepseek-r1:32b-qwen-distill",
+      "family": "deepseek-r1",
+      "size_b": 32,
+      "variant": "distill",
+      "benchmarks": {
+        "aime24": 72.6,
+        "math500": 94.3,
+        "gpqa_diamond": 62.1,
+        "livecodebench": 57.2
+      },
+      "reference_ids": [
+        "ref-deepseek-r1-distill-32b"
+      ]
+    },
+    {
+      "eval_id": "deepseek-r1:70b-llama-distill",
+      "family": "deepseek-r1",
+      "size_b": 70,
+      "variant": "distill",
+      "benchmarks": {
+        "aime24": 70.0,
+        "math500": 94.5,
+        "gpqa_diamond": 65.2,
+        "livecodebench": 57.5
+      },
+      "reference_ids": [
+        "ref-deepseek-r1-distill-32b"
+      ]
+    },
+    {
+      "eval_id": "deepseek-r1:7b-qwen-distill",
+      "family": "deepseek-r1",
+      "size_b": 7,
+      "variant": "distill",
+      "benchmarks": {
+        "aime24": 55.5,
+        "math500": 92.8,
+        "gpqa_diamond": 49.1,
+        "livecodebench": 37.6
+      },
+      "reference_ids": [
+        "ref-deepseek-r1-distill-32b"
+      ]
+    },
+    {
+      "eval_id": "deepseek-r1:8b-llama-distill",
+      "family": "deepseek-r1",
+      "size_b": 8,
+      "variant": "distill",
+      "benchmarks": {
+        "aime24": 50.4,
+        "math500": 89.1,
+        "gpqa_diamond": 49.0,
+        "livecodebench": 39.2
+      },
+      "reference_ids": [
+        "ref-deepseek-r1-distill-32b"
+      ]
+    },
+    {
+      "eval_id": "devstral:24b-instruct",
+      "family": "devstral",
+      "size_b": 24,
+      "variant": "instruct",
+      "benchmarks": {
+        "swe_bench": 46.8
+      },
+      "reference_ids": [
+        "ref-devstral-blog"
+      ]
+    },
+    {
+      "eval_id": "gemma2:27b-it",
+      "family": "gemma2",
+      "size_b": 27,
+      "variant": "instruct",
+      "benchmarks": {
+        "mmlu": 76.2,
+        "humaneval": 67.4
+      },
+      "reference_ids": [
+        "ref-gemma2-arxiv"
+      ]
+    },
+    {
+      "eval_id": "gemma2:2b-it",
+      "family": "gemma2",
+      "size_b": 2,
+      "variant": "instruct",
+      "benchmarks": {
+        "mmlu": 56.1,
+        "humaneval": 36.6
+      },
+      "reference_ids": [
+        "ref-gemma2-arxiv"
+      ]
+    },
+    {
+      "eval_id": "gemma2:9b-it",
+      "family": "gemma2",
+      "size_b": 9,
+      "variant": "instruct",
+      "benchmarks": {
+        "mmlu": 72.3,
+        "humaneval": 59.2
+      },
+      "reference_ids": [
+        "ref-gemma2-arxiv"
+      ]
+    },
+    {
+      "eval_id": "gemma3:12b-it",
+      "family": "gemma3",
+      "size_b": 12,
+      "variant": "instruct",
+      "benchmarks": {
+        "mmlu_pro": 59.9,
+        "gpqa_diamond": 34.7,
+        "livecodebench": 20.8,
+        "ifeval": 88.9,
+        "humaneval": 82.9
+      },
+      "reference_ids": [
+        "ref-gemma3-card"
+      ]
+    },
+    {
+      "eval_id": "gemma3:1b-it",
+      "family": "gemma3",
+      "size_b": 1,
+      "variant": "instruct",
+      "benchmarks": {
+        "mmlu_pro": 27.8,
+        "gpqa_diamond": 19.2,
+        "livecodebench": 5.7,
+        "ifeval": 51.2,
+        "humaneval": 42.3
+      },
+      "reference_ids": [
+        "ref-gemma3-card"
+      ]
+    },
+    {
+      "eval_id": "gemma3:27b-it",
+      "family": "gemma3",
+      "size_b": 27,
+      "variant": "instruct",
+      "benchmarks": {
+        "mmlu_pro": 67.5,
+        "gpqa_diamond": 42.4,
+        "livecodebench": 29.7,
+        "ifeval": 90.4,
+        "humaneval": 87.8
+      },
+      "reference_ids": [
+        "ref-gemma3-card",
+        "ref-gemma3-arxiv"
+      ]
+    },
+    {
+      "eval_id": "gemma3:4b-it",
+      "family": "gemma3",
+      "size_b": 4,
+      "variant": "instruct",
+      "benchmarks": {
+        "mmlu_pro": 43.6,
+        "gpqa_diamond": 25.9,
+        "livecodebench": 12.9,
+        "ifeval": 80.2,
+        "humaneval": 71.3
+      },
+      "reference_ids": [
+        "ref-gemma3-card"
+      ]
+    },
+    {
+      "eval_id": "granite3.3:2b-instruct",
+      "family": "granite3.3",
+      "size_b": 2,
+      "variant": "instruct",
+      "benchmarks": {
+        "mmlu": 55.88,
+        "humaneval": 80.51,
+        "ifeval": 65.8,
+        "aime24": 3.28,
+        "math500": 58.09
+      },
+      "reference_ids": [
+        "ref-granite33-hf"
+      ]
+    },
+    {
+      "eval_id": "granite3.3:8b-instruct",
+      "family": "granite3.3",
+      "size_b": 8,
+      "variant": "instruct",
+      "benchmarks": {
+        "mmlu": 65.54,
+        "humaneval": 89.73,
+        "ifeval": 74.82,
+        "aime24": 8.12,
+        "math500": 69.02
+      },
+      "reference_ids": [
+        "ref-granite33-hf"
+      ]
+    },
+    {
+      "eval_id": "llama3.1:70b-instruct",
+      "family": "llama3.1",
+      "size_b": 70,
+      "variant": "instruct",
+      "benchmarks": {
+        "mmlu": 83.6,
+        "mmlu_pro": 66.4,
+        "gpqa": 46.7,
+        "ifeval": 87.5,
+        "humaneval": 80.5,
+        "math500": 68.0
+      },
+      "reference_ids": [
+        "ref-llama31-70b-hf",
+        "ref-llama31-eval-details"
+      ],
+      "notes": "GPQA/IFEval/HumanEval/MATH from Meta/HF instruct table; MMLU-Pro 66.4 from HF (preferred over Meta eval_details 65.1)."
+    },
+    {
+      "eval_id": "llama3.1:8b-instruct",
+      "family": "llama3.1",
+      "size_b": 8,
+      "variant": "instruct",
+      "benchmarks": {
+        "mmlu": 69.4,
+        "mmlu_pro": 48.3,
+        "gpqa": 30.4,
+        "ifeval": 80.4,
+        "humaneval": 72.6,
+        "math500": 51.9
+      },
+      "reference_ids": [
+        "ref-llama31-8b-hf",
+        "ref-llama31-eval-details"
+      ]
+    },
+    {
+      "eval_id": "llama3.2:1b-instruct",
+      "family": "llama3.2",
+      "size_b": 1,
+      "variant": "instruct",
+      "benchmarks": {
+        "mmlu": 49.3,
+        "ifeval": 59.5,
+        "gpqa": 27.2,
+        "math500": 30.6
+      },
+      "reference_ids": [
+        "ref-llama32-model-card"
+      ]
+    },
+    {
+      "eval_id": "llama3.2:3b-instruct",
+      "family": "llama3.2",
+      "size_b": 3,
+      "variant": "instruct",
+      "benchmarks": {
+        "mmlu": 63.4,
+        "ifeval": 77.4,
+        "gpqa": 32.8,
+        "math500": 48.0
+      },
+      "reference_ids": [
+        "ref-llama32-model-card"
+      ]
+    },
+    {
+      "eval_id": "llama3.3:70b-instruct",
+      "family": "llama3.3",
+      "size_b": 70,
+      "variant": "instruct",
+      "benchmarks": {
+        "mmlu": 86.0,
+        "mmlu_pro": 68.9,
+        "gpqa_diamond": 50.5,
+        "ifeval": 92.1,
+        "humaneval": 88.4,
+        "math500": 77.0
+      },
+      "reference_ids": [
+        "ref-llama33-model-card"
+      ]
+    },
+    {
+      "eval_id": "llama4:maverick-17b-instruct",
+      "family": "llama4",
+      "size_b": 17,
+      "variant": "instruct",
+      "benchmarks": {
+        "mmlu_pro": 80.5,
+        "gpqa_diamond": 69.8,
+        "livecodebench": 43.4,
+        "mmmu": 73.4
+      },
+      "reference_ids": [
+        "ref-llama4-model-card"
+      ]
+    },
+    {
+      "eval_id": "llama4:scout-17b-instruct",
+      "family": "llama4",
+      "size_b": 17,
+      "variant": "instruct",
+      "benchmarks": {
+        "mmlu_pro": 74.3,
+        "gpqa_diamond": 57.2,
+        "livecodebench": 32.8,
+        "mmmu": 69.4
+      },
+      "reference_ids": [
+        "ref-llama4-model-card"
+      ]
+    },
+    {
+      "eval_id": "mistral:7b-instruct",
+      "family": "mistral",
+      "size_b": 7,
+      "variant": "instruct",
+      "benchmarks": {
+        "mmlu": 62.5,
+        "humaneval": 26.2,
+        "math500": 12.7
+      },
+      "reference_ids": [
+        "ref-mistral7b-arxiv"
+      ],
+      "notes": "Mistral 7B pretrained scores from official arXiv 2310.06825."
+    },
+    {
+      "eval_id": "mixtral:8x22b-instruct",
+      "family": "mixtral",
+      "size_b": 141,
+      "variant": "instruct",
+      "benchmarks": {
+        "math500": 44.6
+      },
+      "reference_ids": [
+        "ref-mixtral-8x22b-blog"
+      ],
+      "notes": "Instruct Math maj@4 from Mistral blog."
+    },
+    {
+      "eval_id": "mixtral:8x7b-instruct",
+      "family": "mixtral",
+      "size_b": 47,
+      "variant": "instruct",
+      "benchmarks": {
+        "mmlu": 70.6,
+        "humaneval": 60.7,
+        "math500": 28.4
+      },
+      "reference_ids": [
+        "ref-mixtral-arxiv"
+      ]
+    },
+    {
+      "eval_id": "olmo2:13b-instruct",
+      "family": "olmo2",
+      "size_b": 13,
+      "variant": "instruct",
+      "benchmarks": {
+        "mmlu": 68.5,
+        "ifeval": 82.6,
+        "math500": 39.2
+      },
+      "reference_ids": [
+        "ref-olmo2-hf"
+      ]
+    },
+    {
+      "eval_id": "olmo2:7b-instruct",
+      "family": "olmo2",
+      "size_b": 7,
+      "variant": "instruct",
+      "benchmarks": {
+        "mmlu": 61.3,
+        "ifeval": 72.3,
+        "math500": 32.5
+      },
+      "reference_ids": [
+        "ref-olmo2-hf"
+      ]
+    },
+    {
+      "eval_id": "phi4:14b",
+      "family": "phi4",
+      "size_b": 14,
+      "variant": "instruct",
+      "benchmarks": {
+        "mmlu": 84.8,
+        "gpqa": 56.1,
+        "math500": 80.4,
+        "humaneval": 82.6
+      },
+      "reference_ids": [
+        "ref-phi4-arxiv"
+      ]
+    },
+    {
+      "eval_id": "phi4-mini:3.8b-instruct",
+      "family": "phi4-mini",
+      "size_b": 3.8,
+      "variant": "instruct",
+      "benchmarks": {
+        "mmlu": 67.3,
+        "mmlu_pro": 52.8,
+        "gpqa": 25.2,
+        "math500": 64.0
+      },
+      "reference_ids": [
+        "ref-phi4-mini-hf"
+      ]
+    },
+    {
+      "eval_id": "phi4-reasoning:14b",
+      "family": "phi4-reasoning",
+      "size_b": 14,
+      "variant": "instruct",
+      "benchmarks": {
+        "aime24": 75.3,
+        "gpqa_diamond": 65.8,
+        "livecodebench": 53.8,
+        "mmlu_pro": 74.3,
+        "humaneval": 92.9,
+        "ifeval": 83.4
+      },
+      "reference_ids": [
+        "ref-phi4-reasoning-hf"
+      ]
+    },
+    {
+      "eval_id": "phi4-reasoning:14b-plus",
+      "family": "phi4-reasoning",
+      "size_b": 14,
+      "variant": "instruct",
+      "benchmarks": {
+        "aime24": 81.3,
+        "gpqa_diamond": 68.9,
+        "livecodebench": 53.1,
+        "mmlu_pro": 76.0
+      },
+      "reference_ids": [
+        "ref-phi4-reasoning-hf"
+      ],
+      "notes": "Phi-4-reasoning-plus variant."
+    },
+    {
+      "eval_id": "qwen2.5:14b-instruct",
+      "family": "qwen2.5",
+      "size_b": 14,
+      "variant": "instruct",
+      "benchmarks": {
+        "mmlu_pro": 63.7,
+        "gpqa": 45.5,
+        "livecodebench": 42.6,
+        "ifeval": 81.0,
+        "humaneval": 84.8
+      },
+      "reference_ids": [
+        "ref-qwen25-blog"
+      ]
+    },
+    {
+      "eval_id": "qwen2.5:32b-instruct",
+      "family": "qwen2.5",
+      "size_b": 32,
+      "variant": "instruct",
+      "benchmarks": {
+        "mmlu_pro": 69.0,
+        "gpqa": 49.5,
+        "livecodebench": 51.2,
+        "ifeval": 79.5,
+        "humaneval": 84.8
+      },
+      "reference_ids": [
+        "ref-qwen25-blog"
+      ]
+    },
+    {
+      "eval_id": "qwen2.5:7b-instruct",
+      "family": "qwen2.5",
+      "size_b": 7,
+      "variant": "instruct",
+      "benchmarks": {
+        "mmlu_pro": 56.3,
+        "gpqa": 36.4,
+        "livecodebench": 28.7,
+        "ifeval": 71.2,
+        "humaneval": 84.8
+      },
+      "reference_ids": [
+        "ref-qwen25-blog"
+      ]
+    },
+    {
+      "eval_id": "qwen2.5-coder:14b-instruct",
+      "family": "qwen2.5-coder",
+      "size_b": 14,
+      "variant": "instruct",
+      "benchmarks": {
+        "humaneval": 89.6,
+        "livecodebench": 23.4
+      },
+      "reference_ids": [
+        "ref-qwen25-coder-arxiv"
+      ]
+    },
+    {
+      "eval_id": "qwen2.5-coder:32b-instruct",
+      "family": "qwen2.5-coder",
+      "size_b": 32,
+      "variant": "instruct",
+      "benchmarks": {
+        "humaneval": 92.7,
+        "livecodebench": 31.4
+      },
+      "reference_ids": [
+        "ref-qwen25-coder-arxiv"
+      ]
+    },
+    {
+      "eval_id": "qwen2.5-coder:7b-instruct",
+      "family": "qwen2.5-coder",
+      "size_b": 7,
+      "variant": "instruct",
+      "benchmarks": {
+        "humaneval": 88.4,
+        "livecodebench": 18.2
+      },
+      "reference_ids": [
+        "ref-qwen25-coder-arxiv"
+      ]
+    },
+    {
+      "eval_id": "qwen3:14b-instruct",
+      "family": "qwen3",
+      "size_b": 14,
+      "variant": "instruct",
+      "benchmarks": {
+        "mmlu_pro": 82.0,
+        "gpqa_diamond": 54.8,
+        "ifeval": 84.8,
+        "livecodebench": 29.0,
+        "math500": 90.0,
+        "aime24": 31.7
+      },
+      "reference_ids": [
+        "ref-qwen3-arxiv"
+      ],
+      "notes": "Non-thinking mode (Table 16)."
+    },
+    {
+      "eval_id": "qwen3:235b-a22b-instruct",
+      "family": "qwen3",
+      "size_b": 235,
+      "variant": "instruct",
+      "benchmarks": {
+        "mmlu_pro": 89.2,
+        "gpqa_diamond": 62.9,
+        "ifeval": 83.2,
+        "livecodebench": 35.3,
+        "math500": 91.2,
+        "aime24": 40.1
+      },
+      "reference_ids": [
+        "ref-qwen3-arxiv"
+      ],
+      "notes": "MoE flagship; non-thinking mode (Table 12)."
+    },
+    {
+      "eval_id": "qwen3:32b-instruct",
+      "family": "qwen3",
+      "size_b": 32,
+      "variant": "instruct",
+      "benchmarks": {
+        "mmlu_pro": 85.7,
+        "gpqa_diamond": 54.6,
+        "ifeval": 83.2,
+        "livecodebench": 31.3,
+        "math500": 88.6,
+        "aime24": 31.0
+      },
+      "reference_ids": [
+        "ref-qwen3-arxiv"
+      ],
+      "notes": "Non-thinking mode (Table 14)."
+    },
+    {
+      "eval_id": "qwen3:8b-instruct",
+      "family": "qwen3",
+      "size_b": 8,
+      "variant": "instruct",
+      "benchmarks": {
+        "mmlu_pro": 79.5,
+        "gpqa_diamond": 39.3,
+        "ifeval": 83.0,
+        "livecodebench": 22.8,
+        "math500": 87.4,
+        "aime24": 29.1
+      },
+      "reference_ids": [
+        "ref-qwen3-arxiv"
+      ],
+      "notes": "Non-thinking mode (Table 18)."
+    },
+    {
+      "eval_id": "qwen3.5:122b-a10b-instruct",
+      "family": "qwen3.5",
+      "size_b": 122,
+      "variant": "instruct",
+      "benchmarks": {
+        "mmlu_pro": 86.7,
+        "gpqa_diamond": 86.6,
+        "ifeval": 93.4,
+        "livecodebench": 78.9,
+        "swe_bench": 72.0
+      },
+      "reference_ids": [
+        "ref-qwen35-hf-card"
+      ]
+    },
+    {
+      "eval_id": "qwen3.5:27b-instruct",
+      "family": "qwen3.5",
+      "size_b": 27,
+      "variant": "instruct",
+      "benchmarks": {
+        "mmlu_pro": 86.1,
+        "gpqa_diamond": 85.5,
+        "ifeval": 95.0,
+        "livecodebench": 80.7,
+        "swe_bench": 72.4
+      },
+      "reference_ids": [
+        "ref-qwen35-hf-card"
+      ]
+    },
+    {
+      "eval_id": "qwq:32b-reasoning",
+      "family": "qwq",
+      "size_b": 32,
+      "variant": "instruct",
+      "benchmarks": {
+        "gpqa_diamond": 65.6,
+        "aime24": 79.5,
+        "livecodebench": 62.7,
+        "math500": 98.0,
+        "ifeval": 83.9,
+        "mmlu_pro": 90.0
+      },
+      "reference_ids": [
+        "ref-qwen3-arxiv"
+      ],
+      "notes": "QwQ-32B thinking baseline in Qwen3 report Table 13."
+    }
+  ]
+}

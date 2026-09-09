@@ -129,7 +129,7 @@
             </div>
             <label><span>Sort</span><select id="sort">
               <option value="recommended">Recommended</option>
-              <option value="capability">Capability proxy</option>
+              <option value="capability">Intelligence</option>
               <option value="speed">Estimated speed</option>
               <option value="vram">Lowest VRAM</option>
               <option value="context">Longest context</option>
@@ -152,7 +152,8 @@
     <section class="method-strip">
       <div><strong>Fit</strong><span>Full GPU, partial offload, or unavailable for your memory budget.</span></div>
       <div><strong>Speed</strong><span>Decode tokens per second from a hardware model; only L4 coefficients are measured.</span></div>
-      <div><strong>Capability</strong><span>Active parameter count and catalog signals—not a benchmark score.</span></div>
+      <div><strong>Capability</strong><span>Intelligence from stored benches × quant when available; otherwise a size prior with exponential age decay (half-life 1.1y).</span></div>
+      <div><strong>Task fit</strong><span>Use-case score from a task-specific bench mix (same shape as intelligence); size prior when that mix is missing.</span></div>
       <div><strong>VRAM</strong><span>Weights + projector + capped KV + graph memory at your selected context.</span></div>
     </section>
   </main>
