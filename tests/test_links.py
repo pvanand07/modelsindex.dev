@@ -9,6 +9,7 @@ from __future__ import annotations
 import sys
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
@@ -26,7 +27,7 @@ from link_common import (  # noqa: E402  # pylint: disable=import-error
     size_token,
 )
 from links import _existing_hf_by_release, _pick_paper, _scan_text_for_hf  # noqa: E402  # pylint: disable=import-error
-from hf_source import extract_readme_candidates, sibling_candidates  # noqa: E402  # pylint: disable=import-error
+from hf_source import brave_candidates, extract_readme_candidates, sibling_candidates  # noqa: E402  # pylint: disable=import-error
 
 
 class TestCleanRepo(unittest.TestCase):
@@ -39,6 +40,23 @@ class TestCleanRepo(unittest.TestCase):
     def test_clean_hf_repo_rejects_datasets_and_spaces(self):
         self.assertIsNone(clean_hf_repo("https://huggingface.co/datasets/org/name"))
         self.assertIsNone(clean_hf_repo("https://huggingface.co/spaces/org/name"))
+
+    def test_clean_hf_repo_rejects_docs_and_other_site_sections(self):
+        # Regression: a Brave search for "gemma2" ranked huggingface.co's own docs page above
+        # the actual model repo (huggingface.co/google/gemma-2-2b-it); "docs/transformers" was
+        # wrongly accepted as a repo candidate since it wasn't in the bad-prefix denylist, and
+        # verification couldn't catch it either (a docs page has no raw README.md to reject).
+        self.assertIsNone(clean_hf_repo("https://huggingface.co/docs/transformers/model_doc/gemma2"))
+        self.assertIsNone(clean_hf_repo("https://huggingface.co/tasks/text-generation"))
+        self.assertIsNone(clean_hf_repo("https://huggingface.co/pricing/enterprise"))
+
+    def test_clean_hf_repo_rejects_url_with_no_huggingface_domain(self):
+        # Regression: without an explicit domain check, a URL missing "huggingface.co/"
+        # entirely falls through split()'s no-op case (returns the whole original string
+        # unchanged) and gets parsed as if it were a path, fabricating a bogus "repo" out of
+        # the URL's own scheme/host -- caught while wiring an arbitrary (non-readme, non-HF-only)
+        # source, a Brave search result, into clean_hf_repo.
+        self.assertIsNone(clean_hf_repo("https://example.com/unrelated"))
 
     def test_clean_github_repo_strips_issues_suffix(self):
         self.assertEqual(clean_github_repo("https://github.com/org/name/issues/12"), "org/name")
@@ -298,6 +316,35 @@ class TestSizeToken(unittest.TestCase):
 
     def test_no_size_token_is_none(self):
         self.assertIsNone(size_token("latest"))
+
+
+class TestBraveCandidates(unittest.TestCase):
+    """brave_candidates() itself makes no network call -- it delegates to brave_search_cached()
+    (mocked here) and only owns the results-&gt;repo-candidates extraction, which is what's
+    tested. The Brave API call/cache/audit-trail plumbing is exercised by an actual
+    --brave-search pilot run instead, same as this file's docstring already notes for the other
+    network-touching functions.
+    """
+
+    def test_extracts_and_dedupes_repos_from_results(self):
+        fake_results = [
+            {"url": "https://huggingface.co/org/model-7b", "title": "model-7b"},
+            {"url": "https://huggingface.co/org/model-7b/tree/main", "title": "duplicate, same repo"},
+            {"url": "https://huggingface.co/datasets/org/data", "title": "not a model repo"},
+            {"url": "https://example.com/unrelated", "title": "not huggingface at all"},
+            {"url": "https://huggingface.co/org2/model-13b", "title": "model-13b"},
+        ]
+        with patch("hf_source.brave_search_cached", return_value=fake_results):
+            candidates = brave_candidates("model", "fake-key")
+        self.assertEqual(candidates, ["org/model-7b", "org2/model-13b"])
+
+    def test_no_results_is_empty(self):
+        with patch("hf_source.brave_search_cached", return_value=[]):
+            self.assertEqual(brave_candidates("model", "fake-key"), [])
+
+    def test_missing_url_field_is_skipped_not_crashed(self):
+        with patch("hf_source.brave_search_cached", return_value=[{"title": "no url key"}]):
+            self.assertEqual(brave_candidates("model", "fake-key"), [])
 
 
 if __name__ == "__main__":

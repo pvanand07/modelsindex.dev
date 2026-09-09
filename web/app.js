@@ -705,6 +705,8 @@ function sourceConfidenceHint(key, link) {
   const base = link.confidence === "verified" ? "byte-identical file match"
     : link.method === "github_llm" ? "found via the model's GitHub repo, not hash-verified"
     : link.method === "homepage_llm" ? "found via the model's homepage, not hash-verified"
+    : link.method === "brave_search_verified" ? "found via web search, LLM-confirmed but not hash-verified"
+    : link.method === "brave_search" ? "found via web search, not hash-verified"
     : link.method === "readme_verified" ? "named in the readme, LLM-confirmed but not hash-verified"
     : "named in the readme, not hash-verified";
   return link.isFamilyOnly ? `${base}, family-wide guess, not confirmed for this exact size` : base;

@@ -37,24 +37,37 @@ repo names when unambiguous (no LLM spent); otherwise -- when `--verify-tier2` i
 call disambiguates, one per distinct (family, size-token) group so releases sharing a size don't
 repeat the call.
 
-For families/releases with nothing after tier 1/tier 2, scripts/links.py takes over: it resolves
+--brave-search  for families where readme mining AND sibling-content scanning both come up
+                completely empty, query Brave's web search (site:huggingface.co <family>) as a
+                last resort. Every candidate this turns up flows through the exact same
+                deterministic-size-match / LLM-disambiguate / LLM-verify pipeline as readme/
+                sibling candidates -- the query only needs to maximize recall, not precision.
+                Method vocabulary "brave_search" / "brave_search_verified" (as opposed to
+                "readme" / "readme_verified") marks a pick as having come from a search API, not
+                the family's own readme -- opt-in since it's a paid/rate-limited external API,
+                needs BRAVE_SEARCH_API_KEY.
+
+For families/releases with nothing after tiers 1-3, scripts/links.py takes over: it resolves
 the family's homepage/GitHub/paper links from the same readme and, as a side effect of fetching
 their content, can also turn up a release-specific Hugging Face repo -- see scripts/links.py and
 docs/spec/links.md for that tier.
 
 Needs OPENROUTER_API_KEY + OPENROUTER_BASE_URL (--verify-tier2, and release-level disambiguation
 when a family's readme names more than one ambiguous candidate), read from the environment or
-from a .env file at the repo root (see load_dotenv()).
+from a .env file at the repo root (see load_dotenv()). --brave-search additionally needs
+BRAVE_SEARCH_API_KEY.
 
     python scripts/hf_source.py --refresh          # crawl every digest, cache-first
     python scripts/hf_source.py --refresh --limit 300   # pilot a sample
     python scripts/hf_source.py --verify-tier2      # LLM-verify readme-derived candidates
     python scripts/hf_source.py --verify-tier2 --families llava,wizardlm    # pilot specific families
+    python scripts/hf_source.py --brave-search --verify-tier2   # + web-search fallback for the rest
     python scripts/hf_source.py                     # just rebuild data/out/hf_sources.json from cache
 """
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import re
@@ -65,19 +78,23 @@ import urllib.request
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
+from urllib.parse import urlencode
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from crawl import cached_json  # noqa: E402
 from gguf_header import USER_AGENT  # noqa: E402
 from link_common import (  # noqa: E402,F401
-    DATA, ROOT, atomic_write_json, clean_hf_repo, llm_pick_repo, load_dotenv, openrouter_chat,
-    pick_candidate_for_release, release_key, size_token,
+    DATA, ROOT, atomic_write_json, clean_hf_repo, http_get, llm_pick_repo, load_dotenv,
+    openrouter_chat, pick_candidate_for_release, read_json, release_key, size_token,
 )
 
 CACHE = DATA / "cache" / "hf_source"
 OUT = DATA / "out" / "hf_sources.json"
 HF_README_CACHE = DATA / "cache" / "hf_readme"
 PICK_CACHE = DATA / "cache" / "hf_pick"
+BRAVE_CACHE = DATA / "cache" / "brave_search"
+BRAVE_RESULTS = DATA / "hf_links" / "brave_search_results.json"  # durable audit, NOT gitignored
+BRAVE_API_BASE = "https://api.search.brave.com/res/v1"
 API = "https://modelindex.dev/api/v1/hash/sha256:{}"
 MISS_TTL_DAYS = 14  # modelindex.dev's own crawl grows over time; retry misses periodically
 HIT_TTL_DAYS = None  # a content-hash hit never goes stale
@@ -231,6 +248,75 @@ def _load_family_content_texts(family: str) -> list[str]:
     return texts
 
 
+# --------------------------------------------------------------------------- Brave search (tier 3)
+# For families where neither the readme nor already-fetched sibling content name any HF repo at
+# all -- readme mining and sibling scanning both come up completely empty -- a site-restricted
+# web search is the last resort. Opt-in (--brave-search) since it's a paid/rate-limited external
+# API, same treatment as scripts/links.py gives Exa for homepage fetching.
+def brave_search(query: str, api_key: str) -> dict | None:
+    """One synchronous GET against Brave's Web Search API. Single attempt, no retry -- matches
+    scripts/links.py's exa_fetch convention for a paid/rate-limited external API.
+    """
+    url = f"{BRAVE_API_BASE}/web/search?{urlencode({'q': query, 'count': 10})}"
+    result = http_get(url, headers={"Accept": "application/json", "X-Subscription-Token": api_key})
+    if not result or result[0] != 200:
+        return None
+    return json.loads(result[1])
+
+
+def _brave_cache_path(query: str) -> Path:
+    return BRAVE_CACHE / f"{hashlib.sha1(query.encode('utf-8')).hexdigest()}.json"
+
+
+def _append_brave_audit(family: str, query: str, results: list[dict]) -> None:
+    """Durable audit trail, family-keyed -- Brave is called exactly once per family here (unlike
+    Exa in links.py, called per-URL), so family is the natural key. Own path/schema, not reusing
+    the retired data/hf_links/exa_results.json shape.
+    """
+    existing = read_json(BRAVE_RESULTS) if BRAVE_RESULTS.exists() else {}
+    existing[family] = {"query": query, "results": results}
+    atomic_write_json(BRAVE_RESULTS, existing)
+
+
+def brave_search_cached(family: str, query: str, api_key: str) -> list[dict]:
+    """Cached by content-hash of the query; negative-cached (an empty/failed result is cached
+    too) so a dead-end family costs one call ever, not one per run -- same discipline as
+    scripts/links.py's exa_fetch_cached.
+    """
+    cache_path = _brave_cache_path(query)
+    if cache_path.exists():
+        return read_json(cache_path) or []
+    try:
+        data = brave_search(query, api_key)
+        results = ((data or {}).get("web") or {}).get("results") or []
+    except (urllib.error.URLError, TimeoutError, ConnectionError, json.JSONDecodeError):
+        results = []
+    atomic_write_json(cache_path, results)
+    if results:
+        _append_brave_audit(family, query, results)
+    return results
+
+
+def brave_candidates(family: str, api_key: str) -> list[str]:
+    """A site:huggingface.co web search, turned into clean HF repo candidates in Brave's own
+    relevance-rank order, deduplicated. Precision is enforced downstream (clean_hf_repo rejects
+    non-repo pages; verify_readme_candidate LLM-checks the eventual pick against its real
+    README) -- the query itself only needs to maximize recall, so no query enrichment from the
+    family's description (tried inconsistently across families: some carry the org name, most
+    don't, and there's no reliable way to tell which in advance).
+    """
+    query = f"site:huggingface.co {family}"
+    results = brave_search_cached(family, query, api_key)
+    seen: set[str] = set()
+    out: list[str] = []
+    for r in results:
+        repo = clean_hf_repo(r.get("url") or "")
+        if repo and repo not in seen:
+            seen.add(repo)
+            out.append(repo)
+    return out
+
+
 def pick_repo_for_release(
     family: str, description: str, release_tag_suffix: str, candidates: list[str], llm_model: str, allow_llm: bool,
 ) -> str | None:
@@ -325,9 +411,17 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--llm-workers", type=int, default=3, help="parallel README fetches/LLM calls (be polite)")
     ap.add_argument("--llm-limit", type=int, help="cap how many families get LLM disambiguation/verification this run")
     ap.add_argument("--families", help="comma-separated family names to restrict this run to (pilot targeting)")
+    ap.add_argument(
+        "--brave-search", action="store_true",
+        help="for families with no readme/sibling HF candidate, query Brave's web search "
+             "(site:huggingface.co) as a last-resort tier 3; needs BRAVE_SEARCH_API_KEY",
+    )
     a = ap.parse_args(argv)
 
     load_dotenv()
+    brave_api_key = os.environ.get("BRAVE_SEARCH_API_KEY")
+    if a.brave_search and not brave_api_key:
+        print("[hf_source] --brave-search set but BRAVE_SEARCH_API_KEY is missing, skipping", flush=True)
     models = json.loads((ROOT / "prod/data/models.json").read_text(encoding="utf-8"))["models"]
     library = json.loads((ROOT / "prod/data/library.json").read_text(encoding="utf-8")).get("families", {})
     digests = sorted({m["digest"] for m in models})
@@ -372,6 +466,7 @@ def main(argv: list[str] | None = None) -> int:
     unresolved_families: list[str] = []
     unresolved_releases: list[str] = []
     verify_targets: dict[str, set[str]] = defaultdict(set)    # fam -> {repo, ...} needing verification
+    brave_families: set[str] = set()                          # families whose candidates came from Brave
     llm_budget_families = 0
 
     for fam in family_names:
@@ -388,6 +483,17 @@ def main(argv: list[str] | None = None) -> int:
         for repo in siblings:
             if repo not in candidates:
                 candidates.append(repo)
+
+        # Tier 3, last resort: readme + sibling mining found nothing at all for this family.
+        # Every candidate this family gets this run is therefore Brave-sourced -- one set is
+        # enough to track that, no per-repo/per-release bookkeeping needed, since `candidates`
+        # (and everything downstream keyed off it) is computed once per family and shared by
+        # both the family-wide pick and every release in it.
+        if not candidates and a.brave_search and brave_api_key:
+            brave_repos = brave_candidates(fam, brave_api_key)
+            if brave_repos:
+                candidates = brave_repos
+                brave_families.add(fam)
 
         allow_llm = bool(a.verify_tier2) and (a.llm_limit is None or llm_budget_families < a.llm_limit)
         if allow_llm:
@@ -438,14 +544,20 @@ def main(argv: list[str] | None = None) -> int:
 
     # Phase C: assemble by_family / by_release, applying verification results. A rejected pick
     # (confirmed is False) drops to unresolved rather than shipping a match already known wrong;
-    # confirmed is True/None keep "readme_verified"/"readme" respectively, same as before.
+    # confirmed is True/None keep "*_verified"/plain respectively, same as before. A family whose
+    # candidates came from Brave (tier 3) gets its own method vocabulary -- "brave_search" was
+    # never named in a readme, so labeling it "readme" would misrepresent where it came from
+    # (web/app.js's tooltip text depends on this distinction being accurate).
     likely: dict[str, dict] = {}
     for fam, repo in family_repo.items():
         confirmed = verified_repo.get((fam, repo))
         if confirmed is False:
             unresolved_families.append(fam)
             continue
-        method = "readme_verified" if confirmed is True else "readme"
+        if fam in brave_families:
+            method = "brave_search_verified" if confirmed is True else "brave_search"
+        else:
+            method = "readme_verified" if confirmed is True else "readme"
         likely[fam] = {"repo": repo, "url": f"https://huggingface.co/{repo}", "confidence": "likely", "method": method}
 
     likely_release: dict[str, dict] = {}
@@ -455,7 +567,10 @@ def main(argv: list[str] | None = None) -> int:
         if confirmed is False:
             unresolved_releases.append(release)
             continue
-        method = "readme_verified" if confirmed is True else "readme"
+        if fam in brave_families:
+            method = "brave_search_verified" if confirmed is True else "brave_search"
+        else:
+            method = "readme_verified" if confirmed is True else "readme"
         likely_release[release] = {"repo": repo, "url": f"https://huggingface.co/{repo}", "confidence": "likely", "method": method}
 
     # A --families run only touches the named families -- merge its results into whatever's

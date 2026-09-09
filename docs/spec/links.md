@@ -71,6 +71,8 @@ is one file), so it fills both the `release` and `family` slots identically.
 | `readme_verified` | (hf only) an LLM confirmed the picked repo's own README describes this model/release |
 | `homepage_llm` | (hf only) found scanning the family's homepage's outbound links, LLM-picked |
 | `github_llm` | (hf only) found scanning the family's GitHub README text (or a bare `org/repo` token in it), LLM-picked |
+| `brave_search` | (hf only) found via a Brave web search, not yet/couldn't be LLM-verified |
+| `brave_search_verified` | (hf only) found via a Brave web search, LLM-confirmed against the repo's real README |
 
 Page **content** (not just the link) is saved for `hf`, `github` and `homepage` — never `paper`
 — at `prod/data/link_content.json`, family-keyed. `github`/`homepage` are flat (one project per
@@ -165,6 +167,40 @@ matching `website|homepage|project page|blog`).
 unchanged in meaning — it's exactly the fallback value `build_prod_data.resolve_links()` uses
 for the `family` slot when a specific release has nothing release-specific.
 
+4. **Tier 3, `--brave-search`**: last resort, for families where tiers 1–2 found **nothing at
+   all** (`extract_readme_candidates()` and `sibling_candidates()` both come up empty for that
+   family — not merely "the candidate got rejected," see below). Queries Brave's web search API
+   (`site:huggingface.co <family>`, the bare family slug, no query enrichment — precision is
+   enforced downstream by `clean_hf_repo()` filtering and tier 2's verification step, not by the
+   query) and turns the results into repo candidates the exact same way readme/sibling candidates
+   are: `clean_hf_repo()` on each result URL, in Brave's own relevance-rank order, deduplicated.
+   From there every candidate flows through the identical size-token-match /
+   LLM-disambiguate / LLM-verify pipeline as tiers 1–2 — no separate code path. Opt-in
+   (`--brave-search`, needs `BRAVE_SEARCH_API_KEY`) since it's a paid/rate-limited external API,
+   same treatment `links.py` gives Exa. Cached by content-hash of the query
+   (`data/cache/brave_search/`), negative-cached (a dead-end family costs one call ever, not one
+   per run), with a durable family-keyed audit trail at `data/hf_links/brave_search_results.json`
+   (own path/schema, not reusing the retired family-keyed `exa_results.json` shape).
+
+   Method vocabulary: `brave_search` / `brave_search_verified` — kept distinct from `readme` /
+   `readme_verified` because the pick didn't come from the family's own readme, and
+   `web/app.js`'s tooltip text depends on that distinction being accurate.
+
+   Measured on a full run (2026-09-10): 76 of the then-95 unresolved families resolved (240 →
+   307 distinct (family, repo) verification pairs, 232 confirmed / 24 rejected), leaving 19
+   families genuinely unresolvable even via web search. Spot-checked correct against known
+   publishers (`deepseek-r1` → `deepseek-ai/DeepSeek-R1`, `codellama` →
+   `codellama/CodeLlama-7b-hf`, `bge-large` → `BAAI/bge-large-en`).
+
+   **What tier 3 does *not* do**: retroactively help a family whose tier-2 candidate got
+   *rejected* by verification within the same run. `yi`'s readme names `01-ai/Yi-34B` (the
+   correct publisher) — a non-empty candidate list, so tier 3 never fires for it even though
+   verification went on to reject that specific pick as a family-level match. This is a real,
+   narrow gap (a rejected family stays without an `hf` entry until a *later* run happens to
+   re-confirm it, since Phase A recomputes the same non-empty candidate list every time) — not
+   something this feature was scoped to close; it targets "no candidate found," not "the one
+   candidate found didn't verify."
+
 ### `github` / `homepage` / `paper` — `scripts/links.py`, family-scoped (unchanged)
 
 For every family (not just ones missing an `hf` link — a project can have a GitHub repo
@@ -243,6 +279,12 @@ prod/data/models.json (digest, model, tag), data/out/library.json (readme per fa
          confirmed=True  -> "likely" / method=readme_verified
          confirmed=False -> dropped; release added to the unresolved list for scripts/links.py
          confirmed=None  -> falls through to plain "likely" / method=readme
+  -> scripts/hf_source.py --brave-search --verify-tier2 [optional, needs BRAVE_SEARCH_API_KEY]
+       tier 3, only for families where tier 2 found ZERO candidates (not "rejected", "none at
+         all"): site:huggingface.co <family> -> clean_hf_repo() per result -> same size-token
+         match / LLM-disambiguate / LLM-verify pipeline as tier 2
+       cache -> data/cache/brave_search/<sha1(query)>.json (gitignored, negative-cached)
+     -> data/hf_links/brave_search_results.json   (NOT gitignored -- durable audit, family-keyed)
      -> data/out/hf_sources.json
           {by_digest, by_family, by_release, unresolved_families, unresolved_releases} (gitignored)
         (a --families run merges into the existing file rather than replacing it wholesale --
@@ -321,6 +363,18 @@ already-resolved data.
 - Benchmark matching (`scripts/quality.py`) is a separate, not-yet-integrated system — it has its
   own looser size/variant matcher (`tag_size_b`, `match_eval`) that doesn't consume `release`.
   Aligning the two is a deliberate follow-up, not part of this design.
+- Tier 3 (Brave search) only fires when tier 2 found zero candidates for a family, not when it
+  found one that verification later rejected — a family whose sole readme-derived candidate is
+  wrong (confirmed `yi`: readme names the correct publisher `01-ai/Yi-34B`, but the LLM rejected
+  it as a family-level match) stays without an `hf` entry rather than getting a second attempt in
+  the same run. A later run can still pick it up if verification happens to confirm it instead
+  (LLM judgement on borderline cases isn't perfectly stable run to run), but there's no code path
+  that automatically escalates a rejection to tier 3.
+- `clean_hf_repo()`'s prefix denylist for Hugging Face's own site sections (`docs/`, `tasks/`,
+  `chat/`, ...) is necessarily incomplete — it's grown from concrete false positives (a Brave
+  search for `gemma2` ranked `huggingface.co/docs/transformers/...` above the actual model repo,
+  and slipped through because a docs page has no raw README.md for tier 2's verification step to
+  reject either), not from an exhaustive list of HF's site map.
 
 ## How to run
 
@@ -331,6 +385,10 @@ python scripts/hf_source.py --refresh --workers 6
 # hf tier 2, release-scoped: readme/sibling candidates, size-token match, LLM disambiguation +
 # verification where ambiguous (needs OPENROUTER_API_KEY + OPENROUTER_BASE_URL)
 python scripts/hf_source.py --verify-tier2 --llm-workers 4
+
+# hf tier 3: Brave web search for families tier 2 found nothing at all for (needs
+# BRAVE_SEARCH_API_KEY, plus OPENROUTER_* for the same disambiguation/verification as tier 2)
+python scripts/hf_source.py --brave-search --verify-tier2 --llm-workers 4
 
 # github/homepage/paper + content + per-release hf fallback for everything else (needs
 # OPENROUTER_*; optionally EXA_API_KEY, GITHUB_TOKEN)

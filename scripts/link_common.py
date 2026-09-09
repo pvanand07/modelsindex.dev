@@ -131,7 +131,18 @@ _MD_LINK = re.compile(r"\[([^\]]*)\]\((https?://[^\s)]+)\)", re.I)
 _LABEL_PAPER = re.compile(r"paper|arxiv|preprint|technical report", re.I)
 _LABEL_HOMEPAGE = re.compile(r"website|homepage|home page|project page|\bblog\b|project site", re.I)
 _ARXIV_LINK = re.compile(r"https?://arxiv\.org/abs/[0-9.]+v?\d*", re.I)
-_HF_BAD_PREFIX = ("datasets/", "spaces/", "papers/", "blog/", "learn/", "collections/")
+_HF_BAD_PREFIX = (
+    "datasets/", "spaces/", "papers/", "blog/", "learn/", "collections/",
+    # Hugging Face's own site sections, not an org/repo namespace -- readme links rarely hit
+    # these (an author linking their own model doesn't accidentally link the docs), but a
+    # search result can rank a docs/blog page above the actual model repo (confirmed live:
+    # a Brave search for "gemma2" ranked huggingface.co/docs/transformers/model_doc/gemma2
+    # above huggingface.co/google/gemma-2-2b-it, and it slipped through as the "likely" pick
+    # since a docs page has no raw README.md to fetch, so verification couldn't reject it
+    # either -- it just came back unattempted).
+    "docs/", "tasks/", "chat/", "join/", "pricing/", "enterprise/", "settings/", "posts/",
+    "welcome/", "inference-endpoints/", "inference-api/",
+)
 _GITHUB_BAD_PATH = ("issues", "pull", "blob", "tree", "wiki", "actions", "releases", "discussions", "commit", "compare")
 _GITHUB_BAD_ORG = ("orgs", "sponsors", "marketplace", "topics", "features", "about", "pricing")
 
@@ -150,6 +161,8 @@ def _sanitize_repo_segment(part: str) -> str:
 
 
 def clean_hf_repo(url: str) -> str | None:
+    if "huggingface.co/" not in url.lower():
+        return None
     path = url.split("huggingface.co/", 1)[-1].split("?")[0].split("#")[0]
     if any(path.startswith(p) for p in _HF_BAD_PREFIX):
         return None
