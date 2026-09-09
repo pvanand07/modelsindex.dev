@@ -1,0 +1,1 @@
+{"hf": {"url": "https://huggingface.co/llSourcell/medllama2_7b", "content": "---\nlanguage:\n- en\npipeline_tag: conversational\nlicense: mit\ndatasets:\n- medalpaca/medical_meadow_medqa\n---"}}
