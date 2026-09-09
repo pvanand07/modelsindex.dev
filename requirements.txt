@@ -5,5 +5,7 @@ numpy>=1.24
 # (the Modal GPU Image installs it).
 # scripts/modal_app.py (local client):
 modal>=1.0
-# scripts/hf_source.py --llm-extract only (optional; falls back to Exa if not installed):
+# scripts/links.py's fetches (github/hf/homepage content). Not a hard requirement -- when
+# missing, github/hf fall back to a bare urllib GET (they're plain API/CDN endpoints, no bot
+# wall to route around) and homepage fetching falls back to Exa (EXA_API_KEY):
 hrequests>=0.9

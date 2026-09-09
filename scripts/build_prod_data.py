@@ -65,17 +65,31 @@ def capability_signals(model: dict) -> list[str]:
     return signals
 
 
-def resolve_hf_source(digest: str, family: str, hf_sources: dict | None) -> dict | None:
-    """Verified (hash-matched) beats likely (readme/homepage-matched); either can be absent."""
-    if not hf_sources:
-        return None
+def resolve_links(digest: str, family: str, hf_sources: dict | None, links: dict | None) -> dict:
+    """The four provenance links for one model row.
+
+    `hf` is resolved with the same precedence scripts/hf_source.py has always used -- a
+    digest-level hash match (`verified`) beats a family-level readme match (`likely`), because
+    byte-identity is necessarily per-file (quant-specific), not per-family. Falls further back to
+    whatever scripts/links.py found via the family's homepage/GitHub content (also `likely`) when
+    hf_source.py's tiers found nothing at all for this family. `github`/`homepage`/`paper` have
+    no finer grain than family to fall back on -- every quant of a family shares one project.
+    """
+    hf_sources = hf_sources or {}
     hit = (hf_sources.get("by_digest") or {}).get(digest)
     if hit:
-        return {"repo": hit["repo"], "url": hit["url"], "confidence": "verified"}
-    hit = (hf_sources.get("by_family") or {}).get(family)
-    if hit:
-        return {"repo": hit["repo"], "url": hit["url"], "confidence": "likely", "method": hit.get("method", "readme")}
-    return None
+        hf = {"repo": hit["repo"], "url": hit["url"], "confidence": "verified"}
+    else:
+        hit = (hf_sources.get("by_family") or {}).get(family)
+        hf = (
+            {"repo": hit["repo"], "url": hit["url"], "confidence": "likely", "method": hit.get("method", "readme")}
+            if hit else None
+        )
+
+    fam_links = ((links or {}).get("by_family") or {}).get(family) or {}
+    if not hf:
+        hf = fam_links.get("hf")
+    return {"hf": hf, "github": fam_links.get("github"), "homepage": fam_links.get("homepage"), "paper": fam_links.get("paper")}
 
 
 def compact_model(
@@ -83,6 +97,7 @@ def compact_model(
     aliases: list[str],
     pushed_at: str | None = None,
     hf_sources: dict | None = None,
+    links: dict | None = None,
 ) -> dict:
     return {
         "ref": primary["ref"],
@@ -114,11 +129,16 @@ def compact_model(
         "pushed_at": pushed_at or primary.get("pushed_at"),
         "description": (primary.get("description") or "").strip(),
         "signals": capability_signals(primary),
-        "hf_source": resolve_hf_source(primary["digest"], primary.get("model") or "", hf_sources),
+        "links": resolve_links(primary["digest"], primary.get("model") or "", hf_sources, links),
     }
 
 
-def deduplicate_models(models: list[dict], library: dict | None = None, hf_sources: dict | None = None) -> list[dict]:
+def deduplicate_models(
+    models: list[dict],
+    library: dict | None = None,
+    hf_sources: dict | None = None,
+    links: dict | None = None,
+) -> list[dict]:
     families = (library or {}).get("families") or library or {}
     grouped: dict[str, list[dict]] = defaultdict(list)
     for model in models:
@@ -127,7 +147,7 @@ def deduplicate_models(models: list[dict], library: dict | None = None, hf_sourc
     for digest_models in grouped.values():
         primary = min(digest_models, key=canonical_key)
         times = [m["pushed_at"] for m in digest_models if m.get("pushed_at")]
-        compact = compact_model(primary, [m["ref"] for m in digest_models], max(times) if times else None, hf_sources)
+        compact = compact_model(primary, [m["ref"] for m in digest_models], max(times) if times else None, hf_sources, links)
         fam = families.get(primary.get("model") or "") if isinstance(families, dict) else None
         if isinstance(fam, dict) and fam.get("description") and not compact["description"]:
             compact["description"] = str(fam["description"]).strip()
@@ -146,6 +166,33 @@ def compact_library(library: dict | None, model_names: set[str]) -> dict:
         readme = str(fam.get("readme") or "").strip()
         if description or readme:
             out[name] = {"description": description, "readme": readme}
+    return out
+
+
+def load_link_content(link_content_dir: Path) -> dict[str, dict]:
+    """data/link_content/<family>.json, one file per family (scripts/links.py), loaded into a
+    single {family: {"hf"|"github"|"homepage": {"url","content"}}} dict.
+    """
+    out: dict[str, dict] = {}
+    if not link_content_dir.is_dir():
+        return out
+    for path in link_content_dir.glob("*.json"):
+        out[path.stem] = load_json(path)
+    return out
+
+
+def compact_link_content(link_content: dict[str, dict], model_names: set[str]) -> dict:
+    """Same shape/precedent as compact_library: family-keyed, only families actually in the
+    catalog, no `paper` key ever (page content is only saved for hf/github/homepage).
+    """
+    out = {}
+    for name in sorted(model_names):
+        fam = link_content.get(name)
+        if not isinstance(fam, dict) or not fam:
+            continue
+        entry = {k: v for k, v in fam.items() if k in ("hf", "github", "homepage") and v}
+        if entry:
+            out[name] = entry
     return out
 
 
@@ -230,8 +277,10 @@ def build(
     scores: dict | None = None,
     q_base: dict | None = None,
     hf_sources: dict | None = None,
-) -> tuple[dict, dict, dict, dict, dict]:
-    models = deduplicate_models(index["models"], library, hf_sources)
+    links: dict | None = None,
+    link_content: dict[str, dict] | None = None,
+) -> tuple[dict, dict, dict, dict, dict, dict]:
+    models = deduplicate_models(index["models"], library, hf_sources, links)
     gpus = [compact_gpu(g, constants) for g in index["gpus"]]
     quality = compact_quality(models, scores, q_base)
     calibrated_digest_count = sum(m["vram_digest_calibrated"] for m in models)
@@ -278,7 +327,11 @@ def build(
         "schema_version": SCHEMA_VERSION,
         "families": compact_library(library, {m["model"] for m in models}),
     }
-    return manifest, hardware, catalog, library_out, quality
+    link_content_out = {
+        "schema_version": SCHEMA_VERSION,
+        "families": compact_link_content(link_content or {}, {m["model"] for m in models}),
+    }
+    return manifest, hardware, catalog, library_out, quality, link_content_out
 
 
 def write_json(path: Path, value: dict) -> None:
@@ -296,6 +349,8 @@ def main(argv=None) -> int:
     parser.add_argument("--scores", default="data/quality/scores.json")
     parser.add_argument("--q-base", default="data/quality/q_base.json")
     parser.add_argument("--hf-sources", default="data/out/hf_sources.json")
+    parser.add_argument("--links", default="data/out/links.json")
+    parser.add_argument("--link-content", default="data/link_content")
     parser.add_argument("--out-dir", default="prod/data")
     args = parser.parse_args(argv)
 
@@ -312,23 +367,28 @@ def main(argv=None) -> int:
     q_base = load_json(q_base_path) if q_base_path.exists() else None
     hf_sources_path = Path(args.hf_sources)
     hf_sources = load_json(hf_sources_path) if hf_sources_path.exists() else None
-    manifest, hardware, catalog, library_out, quality = build(
-        index, constants, library, scores, q_base, hf_sources,
+    links_path = Path(args.links)
+    links = load_json(links_path) if links_path.exists() else None
+    link_content = load_link_content(Path(args.link_content))
+    manifest, hardware, catalog, library_out, quality, link_content_out = build(
+        index, constants, library, scores, q_base, hf_sources, links, link_content,
     )
     write_json(out_dir / "manifest.json", manifest)
     write_json(out_dir / "gpus.json", hardware)
     write_json(out_dir / "models.json", catalog)
     write_json(out_dir / "library.json", library_out)
     write_json(out_dir / "quality.json", quality)
+    write_json(out_dir / "link_content.json", link_content_out)
     total = sum(
         (out_dir / name).stat().st_size
-        for name in ("manifest.json", "gpus.json", "models.json", "library.json", "quality.json")
+        for name in ("manifest.json", "gpus.json", "models.json", "library.json", "quality.json", "link_content.json")
     )
-    hf_hits = sum(1 for m in catalog["models"] if m.get("hf_source"))
+    link_counts = {k: sum(1 for m in catalog["models"] if (m.get("links") or {}).get(k)) for k in ("hf", "github", "homepage", "paper")}
     print(
         f"[prod] {manifest['unique_models']} unique models, {manifest['gpu_count']} GPUs, "
         f"{len(library_out['families'])} library pages, {manifest['quality_refs']} quality refs, "
-        f"{hf_hits} with an hf_source -> {out_dir} ({total / 1e6:.2f} MB)"
+        f"links {link_counts}, {len(link_content_out['families'])} families with saved content "
+        f"-> {out_dir} ({total / 1e6:.2f} MB)"
     )
     return 0
 

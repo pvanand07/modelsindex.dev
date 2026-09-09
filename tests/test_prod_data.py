@@ -14,10 +14,12 @@ sys.path.insert(0, str(ROOT / "scripts"))
 from build_prod_data import (  # noqa: E402  # pylint: disable=import-error
     build,
     canonical_key,
+    compact_link_content,
     compact_quality,
     deduplicate_models,
     lookup_score,
     main,
+    resolve_links,
 )
 from gguf_header import normalize_quant  # noqa: E402  # pylint: disable=import-error
 
@@ -79,6 +81,61 @@ class TestDeduplication(unittest.TestCase):
         by_ref = {row["ref"]: row for row in rows}
         self.assertIn("code", by_ref["starcoder2:latest"]["signals"])
         self.assertIn("embedding", by_ref["nomic-embed-text:latest"]["signals"])
+
+
+class TestLinksExport(unittest.TestCase):
+    def test_digest_verified_beats_family_likely(self):
+        hf_sources = {
+            "by_digest": {"sha256:a": {"repo": "org/exact", "url": "https://huggingface.co/org/exact"}},
+            "by_family": {"demo": {"repo": "org/guess", "url": "https://huggingface.co/org/guess", "method": "readme"}},
+        }
+        links = resolve_links("sha256:a", "demo", hf_sources, None)
+        self.assertEqual(links["hf"]["confidence"], "verified")
+        self.assertEqual(links["hf"]["repo"], "org/exact")
+
+    def test_family_likely_used_when_digest_has_no_hit(self):
+        hf_sources = {
+            "by_digest": {},
+            "by_family": {"demo": {"repo": "org/guess", "url": "https://huggingface.co/org/guess", "method": "readme_verified"}},
+        }
+        links = resolve_links("sha256:b", "demo", hf_sources, None)
+        self.assertEqual(links["hf"]["confidence"], "likely")
+        self.assertEqual(links["hf"]["method"], "readme_verified")
+
+    def test_links_fallback_hf_used_only_when_hf_source_has_nothing(self):
+        links_data = {
+            "by_family": {
+                "demo": {
+                    "hf": {"repo": "org/fallback", "url": "https://huggingface.co/org/fallback", "confidence": "likely", "method": "homepage_llm"},
+                    "github": {"repo": "org/demo", "url": "https://github.com/org/demo", "confidence": "likely", "method": "readme"},
+                    "homepage": None,
+                    "paper": None,
+                }
+            }
+        }
+        resolved = resolve_links("sha256:c", "demo", None, links_data)
+        self.assertEqual(resolved["hf"]["method"], "homepage_llm")
+        self.assertEqual(resolved["github"]["repo"], "org/demo")
+        self.assertIsNone(resolved["homepage"])
+        self.assertIsNone(resolved["paper"])
+
+    def test_no_links_at_all_is_all_none(self):
+        resolved = resolve_links("sha256:d", "demo", None, None)
+        self.assertEqual(resolved, {"hf": None, "github": None, "homepage": None, "paper": None})
+
+    def test_compact_link_content_drops_paper_and_unknown_families(self):
+        link_content = {
+            "demo": {"hf": {"url": "https://huggingface.co/org/demo", "content": "card text"}},
+            "other": {"github": {"url": "https://github.com/org/other", "content": "readme text"}},
+        }
+        out = compact_link_content(link_content, {"demo"})
+        self.assertIn("demo", out)
+        self.assertNotIn("other", out)
+        self.assertNotIn("paper", out["demo"])
+
+    def test_compact_link_content_skips_empty_families(self):
+        out = compact_link_content({"demo": {}}, {"demo"})
+        self.assertEqual(out, {})
 
 
 class TestQuantNormalization(unittest.TestCase):
@@ -165,7 +222,7 @@ class TestProductionRegression(unittest.TestCase):
         q_base_path = ROOT / "data/quality/q_base.json"
         cls.scores = json.loads(scores_path.read_text(encoding="utf-8")) if scores_path.exists() else None
         cls.q_base = json.loads(q_base_path.read_text(encoding="utf-8")) if q_base_path.exists() else None
-        cls.manifest, cls.hardware, cls.catalog, cls.library, cls.quality = build(
+        cls.manifest, cls.hardware, cls.catalog, cls.library, cls.quality, cls.link_content = build(
             cls.index, cls.constants, scores=cls.scores, q_base=cls.q_base,
         )
 
@@ -218,7 +275,7 @@ class TestProductionRegression(unittest.TestCase):
             ]
             self.assertEqual(main([*args, "--out-dir", first]), 0)
             self.assertEqual(main([*args, "--out-dir", second]), 0)
-            for name in ("manifest.json", "gpus.json", "models.json", "library.json", "quality.json"):
+            for name in ("manifest.json", "gpus.json", "models.json", "library.json", "quality.json", "link_content.json"):
                 a = (Path(first) / name).read_bytes()
                 b = (Path(second) / name).read_bytes()
                 self.assertEqual(a, b)

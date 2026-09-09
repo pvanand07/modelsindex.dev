@@ -662,6 +662,16 @@ const SOURCE_ICONS = {
   // tone) -- looked like a blank yellow blob. The real mark people recognize is the
   // 🤗 emoji itself, which renders its own shading natively, so use that directly.
   huggingface: '<span class="source-emoji" role="img" aria-hidden="true">\u{1F917}</span>',
+  github: '<svg viewBox="0 0 24 24" width="13" height="13" fill="currentColor"><path d="M12 .297c-6.63 0-12 5.373-12 12 0 5.303 3.438 9.8 8.205 11.385.6.113.82-.258.82-.577 0-.285-.01-1.04-.015-2.04-3.338.724-4.042-1.61-4.042-1.61C4.422 18.07 3.633 17.7 3.633 17.7c-1.087-.744.084-.729.084-.729 1.205.084 1.838 1.236 1.838 1.236 1.07 1.835 2.809 1.305 3.495.998.108-.776.417-1.305.76-1.605-2.665-.3-5.466-1.332-5.466-5.93 0-1.31.465-2.38 1.235-3.22-.135-.303-.54-1.523.105-3.176 0 0 1.005-.322 3.3 1.23.96-.267 1.98-.399 3-.405 1.02.006 2.04.138 3 .405 2.28-1.552 3.285-1.23 3.285-1.23.645 1.653.24 2.873.12 3.176.765.84 1.23 1.91 1.23 3.22 0 4.61-2.805 5.625-5.475 5.92.42.36.81 1.096.81 2.22 0 1.606-.015 2.896-.015 3.286 0 .315.21.69.825.57C20.565 22.092 24 17.592 24 12.297c0-6.627-5.373-12-12-12"/></svg>',
+  homepage: '<svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M2 12h20M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10Z"/></svg>',
+  paper: '<svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8Z"/><path d="M14 2v6h6M9 13h6M9 17h6M9 9h1"/></svg>',
+};
+
+const SOURCE_LABELS = {
+  huggingface: (l) => `Hugging Face — ${l.repo}`,
+  github: (l) => `GitHub — ${l.repo}`,
+  homepage: () => "Project homepage",
+  paper: () => "Paper",
 };
 
 // Verified badge, traced from Lucide badge-check (ISC). Filled blue seal + white check.
@@ -672,44 +682,72 @@ function sourceIconHtml(kind, href, label, verified) {
   return `<a class="source-icon" href="${esc(href)}" target="_blank" rel="noopener noreferrer" title="${esc(label)}" aria-label="${esc(label)}">${SOURCE_ICONS[kind]}${mark}</a>`;
 }
 
+function sourceConfidenceHint(key, link) {
+  if (!link) return "";
+  if (key !== "hf") {
+    // github/homepage/paper have no hash-verification concept -- they're always "found
+    // somewhere", the only question is how directly.
+    return link.method === "github_llm" ? "found via the model's GitHub repo"
+      : link.method === "homepage_llm" ? "found via the model's homepage"
+      : "linked from the Ollama readme";
+  }
+  return link.confidence === "verified" ? "byte-identical file match"
+    : link.method === "github_llm" ? "found via the model's GitHub repo, not hash-verified"
+    : link.method === "homepage_llm" ? "found via the model's homepage, not hash-verified"
+    : link.method === "readme_verified" ? "named in the readme, LLM-confirmed but not hash-verified"
+    : "named in the readme, not hash-verified";
+}
+
 function sourceIconsHtml(row) {
   const items = [sourceIconHtml("ollama", `https://ollama.com/library/${encodeURIComponent(row.model)}`, "Ollama library page")];
-  const hf = row.hf_source;
-  if (hf && hf.url) {
-    const verified = hf.confidence === "verified";
-    const how = verified ? "byte-identical file match"
-      : hf.method === "homepage_llm" ? "found via the model's homepage, not hash-verified"
-      : hf.method === "readme_verified" ? "named in the readme, LLM-confirmed but not hash-verified"
-      : "named in the readme, not hash-verified";
-    const label = `Hugging Face — ${hf.repo} (${how})`;
-    items.push(sourceIconHtml("huggingface", hf.url, label, verified));
+  const links = row.links || {};
+  for (const kind of ["huggingface", "github", "homepage", "paper"]) {
+    const key = kind === "huggingface" ? "hf" : kind;
+    const link = links[key];
+    if (!link || !link.url) continue;
+    const verified = link.confidence === "verified";
+    const label = `${SOURCE_LABELS[kind](link)} (${sourceConfidenceHint(key, link)})`;
+    items.push(sourceIconHtml(kind, link.url, label, verified));
   }
   return `<div class="source-icons">${items.join("")}</div>`;
 }
 
 function sourceLinksHtml(row) {
-  const links = [`<a href="https://ollama.com/library/${encodeURIComponent(row.model)}" target="_blank" rel="noopener noreferrer">Ollama library page</a>`];
-  const hf = row.hf_source;
-  if (hf && hf.url) {
-    const hint = hf.confidence === "verified" ? "byte-identical file match"
-      : hf.method === "homepage_llm" ? "found via the model's homepage, not hash-verified"
-      : hf.method === "readme_verified" ? "named in the readme, LLM-confirmed but not hash-verified"
-      : "named in the Ollama readme, not hash-verified";
-    links.push(`<a href="${esc(hf.url)}" target="_blank" rel="noopener noreferrer" title="${esc(hint)}">Hugging Face${hf.confidence === "verified" ? "" : " (unverified)"} ↗</a>`);
+  const parts = [`<a href="https://ollama.com/library/${encodeURIComponent(row.model)}" target="_blank" rel="noopener noreferrer">Ollama library page</a>`];
+  const links = row.links || {};
+  const labels = { hf: "Hugging Face", github: "GitHub", homepage: "Homepage", paper: "Paper" };
+  for (const key of ["hf", "github", "homepage", "paper"]) {
+    const link = links[key];
+    if (!link || !link.url) continue;
+    const hint = sourceConfidenceHint(key, link);
+    const unverified = key === "hf" && link.confidence !== "verified";
+    parts.push(`<a href="${esc(link.url)}" target="_blank" rel="noopener noreferrer" title="${esc(hint)}">${labels[key]}${unverified ? " (unverified)" : ""} ↗</a>`);
   }
-  return `<p class="library-link">${links.join(" · ")}</p>`;
+  return `<p class="library-link">${parts.join(" · ")}</p>`;
+}
+
+function linkContentHtml(row) {
+  const content = catalog.linkContent[row.model];
+  if (!content) return "";
+  const titles = { hf: "Hugging Face model card", github: "GitHub readme", homepage: "Homepage" };
+  return ["hf", "github", "homepage"]
+    .filter((key) => content[key] && content[key].content)
+    .map((key) => `<details class="library-readme"><summary>${esc(titles[key])}</summary>${mdToHtml(content[key].content)}</details>`)
+    .join("");
 }
 
 function technicalHtml(row) {
   if (state.open !== row.ref) return "";
   const readme = familyCopy(row).readme || "";
-  if (!readme) {
+  const extra = linkContentHtml(row);
+  if (!readme && !extra) {
     return sourceLinksHtml(row);
   }
   return `
-    <div class="library-readme">${mdToHtml(readme)}
+    <div class="library-readme">${readme ? mdToHtml(readme) : ""}
       ${sourceLinksHtml(row)}
-    </div>`;
+    </div>
+    ${extra}`;
 }
 
 function cardHtml(row, index) {
@@ -962,12 +1000,13 @@ function bind() {
 
 async function loadData() {
   const base = String(window.MODELINDEX_DATA_BASE || "../prod/data").replace(/\/$/, "");
-  const [manifestResponse, gpuResponse, modelResponse, libraryResponse, qualityResponse] = await Promise.all([
+  const [manifestResponse, gpuResponse, modelResponse, libraryResponse, qualityResponse, linkContentResponse] = await Promise.all([
     fetch(`${base}/manifest.json`),
     fetch(`${base}/gpus.json`),
     fetch(`${base}/models.json`),
     fetch(`${base}/library.json`),
     fetch(`${base}/quality.json`),
+    fetch(`${base}/link_content.json`),
   ]);
   for (const response of [manifestResponse, gpuResponse, modelResponse]) {
     if (!response.ok) throw new Error(`${response.url} returned ${response.status}`);
@@ -982,6 +1021,14 @@ async function loadData() {
       throw new Error("Production data schema versions do not match");
     }
     catalog.library = library.families || {};
+  }
+  catalog.linkContent = {};
+  if (linkContentResponse.ok) {
+    const linkContent = await linkContentResponse.json();
+    if (linkContent.schema_version && linkContent.schema_version !== manifest.schema_version) {
+      throw new Error("Production data schema versions do not match");
+    }
+    catalog.linkContent = linkContent.families || {};
   }
   if (qualityResponse.ok) {
     const payload = await qualityResponse.json();
