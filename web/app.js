@@ -677,7 +677,11 @@ function sourceIconsHtml(row) {
   const hf = row.hf_source;
   if (hf && hf.url) {
     const verified = hf.confidence === "verified";
-    const label = `Hugging Face — ${hf.repo} (${verified ? "byte-identical file match" : "named in the readme, not hash-verified"})`;
+    const how = verified ? "byte-identical file match"
+      : hf.method === "homepage_llm" ? "found via the model's homepage, not hash-verified"
+      : hf.method === "readme_verified" ? "named in the readme, LLM-confirmed but not hash-verified"
+      : "named in the readme, not hash-verified";
+    const label = `Hugging Face — ${hf.repo} (${how})`;
     items.push(sourceIconHtml("huggingface", hf.url, label, verified));
   }
   return `<div class="source-icons">${items.join("")}</div>`;
@@ -687,7 +691,10 @@ function sourceLinksHtml(row) {
   const links = [`<a href="https://ollama.com/library/${encodeURIComponent(row.model)}" target="_blank" rel="noopener noreferrer">Ollama library page</a>`];
   const hf = row.hf_source;
   if (hf && hf.url) {
-    const hint = hf.confidence === "verified" ? "byte-identical file match" : "named in the Ollama readme, not hash-verified";
+    const hint = hf.confidence === "verified" ? "byte-identical file match"
+      : hf.method === "homepage_llm" ? "found via the model's homepage, not hash-verified"
+      : hf.method === "readme_verified" ? "named in the readme, LLM-confirmed but not hash-verified"
+      : "named in the Ollama readme, not hash-verified";
     links.push(`<a href="${esc(hf.url)}" target="_blank" rel="noopener noreferrer" title="${esc(hint)}">Hugging Face${hf.confidence === "verified" ? "" : " (unverified)"} ↗</a>`);
   }
   return `<p class="library-link">${links.join(" · ")}</p>`;

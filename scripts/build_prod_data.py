@@ -66,7 +66,7 @@ def capability_signals(model: dict) -> list[str]:
 
 
 def resolve_hf_source(digest: str, family: str, hf_sources: dict | None) -> dict | None:
-    """Verified (hash-matched) beats likely (readme-text-matched); either can be absent."""
+    """Verified (hash-matched) beats likely (readme/homepage-matched); either can be absent."""
     if not hf_sources:
         return None
     hit = (hf_sources.get("by_digest") or {}).get(digest)
@@ -74,7 +74,7 @@ def resolve_hf_source(digest: str, family: str, hf_sources: dict | None) -> dict
         return {"repo": hit["repo"], "url": hit["url"], "confidence": "verified"}
     hit = (hf_sources.get("by_family") or {}).get(family)
     if hit:
-        return {"repo": hit["repo"], "url": hit["url"], "confidence": "likely"}
+        return {"repo": hit["repo"], "url": hit["url"], "confidence": "likely", "method": hit.get("method", "readme")}
     return None
 
 

@@ -1,4 +1,9 @@
 # crawl.py, gguf_header.py and bench.py are stdlib only.
 # fit.py and build_index.py:
 numpy>=1.24
-# bench.py uses torch for the bandwidth test only if it is importable (RunPod pytorch template has it).
+# bench.py uses torch for the bandwidth test only if it is importable
+# (the Modal GPU Image installs it).
+# scripts/modal_app.py (local client):
+modal>=1.0
+# scripts/hf_source.py --llm-extract only (optional; falls back to Exa if not installed):
+hrequests>=0.9
