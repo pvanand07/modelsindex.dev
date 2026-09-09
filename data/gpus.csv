@@ -7,20 +7,23 @@ rtx4060ti-16,NVIDIA GeForce RTX 4060 Ti,nvidia,discrete,ada,16,0.92,288,88,
 rtx4070-12,NVIDIA GeForce RTX 4070,nvidia,discrete,ada,12,0.92,504,58,
 rtx4070tis-16,NVIDIA GeForce RTX 4070 Ti SUPER,nvidia,discrete,ada,16,0.92,672,88,
 rtx4080-16,NVIDIA GeForce RTX 4080,nvidia,discrete,ada,16,0.92,717,97,
-rtx4090,NVIDIA GeForce RTX 4090,nvidia,discrete,ada,24,0.92,1008,165,"runpod P0 anchor"
+rtx4090,NVIDIA GeForce RTX 4090,nvidia,discrete,ada,24,0.92,1008,165,"consumer; uncalibrated on Modal"
 rtx5070-12,NVIDIA GeForce RTX 5070,nvidia,discrete,blackwell,12,0.92,672,62,
 rtx5080-16,NVIDIA GeForce RTX 5080,nvidia,discrete,blackwell,16,0.92,960,112,
 rtx5090,NVIDIA GeForce RTX 5090,nvidia,discrete,blackwell,32,0.92,1792,209,"runpod"
 rtxa5000,NVIDIA RTX A5000,nvidia,discrete,ampere,24,0.92,768,111,"runpod"
 rtxa6000,NVIDIA RTX A6000,nvidia,discrete,ampere,48,0.92,768,155,"runpod"
 a40,NVIDIA A40,nvidia,discrete,ampere,48,0.92,696,150,"runpod"
-l4,NVIDIA L4,nvidia,discrete,ada,24,0.92,300,121,"runpod"
-l40s,NVIDIA L40S,nvidia,discrete,ada,48,0.92,864,362,"runpod"
-rtx6000ada,NVIDIA RTX 6000 Ada Generation,nvidia,discrete,ada,48,0.92,960,364,"runpod"
-a100-80-pcie,NVIDIA A100 80GB PCIe,nvidia,discrete,ampere,80,0.94,1935,312,"runpod; HBM2e"
-a100-80-sxm,NVIDIA A100-SXM4-80GB,nvidia,discrete,ampere,80,0.94,2039,312,"HBM2e"
-h100-80-pcie,NVIDIA H100 PCIe,nvidia,discrete,hopper,80,0.94,2000,756,"runpod; HBM2e"
-h100-80-sxm,NVIDIA H100 80GB HBM3,nvidia,discrete,hopper,80,0.94,3350,989,
+a10,NVIDIA A10,nvidia,discrete,ampere,24,0.92,600,125,"modal; A10G matches this row"
+l4,NVIDIA L4,nvidia,discrete,ada,24,0.92,300,121,"modal P0 anchor"
+l40s,NVIDIA L40S,nvidia,discrete,ada,48,0.92,864,362,"modal"
+rtx6000ada,NVIDIA RTX 6000 Ada Generation,nvidia,discrete,ada,48,0.92,960,364,
+rtx-pro-6000,NVIDIA RTX PRO 6000 Blackwell,nvidia,discrete,blackwell,96,0.94,1792,230,"modal optional; GDDR7"
+a100-80-pcie,NVIDIA A100 80GB PCIe,nvidia,discrete,ampere,80,0.94,1935,312,"HBM2e"
+a100-80-sxm,NVIDIA A100-SXM4-80GB,nvidia,discrete,ampere,80,0.94,2039,312,"modal; pin gpu=A100-80GB; HBM2e"
+h100-80-pcie,NVIDIA H100 PCIe,nvidia,discrete,hopper,80,0.94,2000,756,"HBM2e"
+h100-80-sxm,NVIDIA H100 80GB HBM3,nvidia,discrete,hopper,80,0.94,3350,989,"modal optional; pin gpu=H100!"
+b200,NVIDIA B200,nvidia,discrete,blackwell,192,0.94,8000,2250,"modal optional; HBM3e"
 rx7900xtx,AMD Radeon RX 7900 XTX,amd,discrete,rdna3,24,0.92,960,123,
 m1,Apple M1,apple,unified,m1,16,0.75,68,5,"unified memory; usable = 75% of system RAM"
 m1-pro,Apple M1 Pro,apple,unified,m1,32,0.75,200,10,

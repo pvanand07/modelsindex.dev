@@ -18,6 +18,7 @@ import argparse
 import json
 import math
 import os
+import re
 import struct
 import sys
 import urllib.request
@@ -26,12 +27,53 @@ USER_AGENT = "modelindex-crawler/0.1 (+https://github.com/local/modelindex)"
 FIRST_FETCH = 8 * 1024 * 1024
 MAX_FETCH = 512 * 1024 * 1024
 ARRAY_SUMMARY_THRESHOLD = 64  # arrays longer than this are stored as {"__len__": n}
+# Architecture arrays must stay full even when longer than the tokenizer threshold.
+KEEP_FULL_ARRAY_SUFFIXES = (
+    "attention.sliding_window_pattern",
+    "attention.head_count_kv",
+    "attention.head_count",
+)
 
 SELFTEST_URL = (
     "https://registry.ollama.ai/v2/library/llama3.2/blobs/"
     "sha256:dde5aa3fc5ffc17176b5e8bdc82f587b24b2678c6c66101bf7da77af9f7ccdff"
 )
 SELFTEST_EXPECT = {"param_count": 3212749888, "n_layer": 28, "n_head_kv": 8, "key_length": 128}
+
+# llama.cpp llama_ftype integers. Many GGUFs omit general.file_type.
+FILE_TYPE_NAMES = {
+    0: "F32", 1: "F16", 2: "Q4_0", 3: "Q4_1", 7: "Q8_0", 8: "Q5_0", 9: "Q5_1",
+    10: "Q2_K", 11: "Q3_K_S", 12: "Q3_K_M", 13: "Q3_K_L", 14: "Q4_K_S",
+    15: "Q4_K_M", 16: "Q5_K_S", 17: "Q5_K_M", 18: "Q6_K", 32: "BF16",
+}
+_PLACEHOLDER_QUANTS = {"", "unknown", "none", "null", "n/a"}
+_TAG_QUANT = re.compile(
+    r"(?:^|[-_:])(f32|f16|fp16|bf16|q[2-8](?:_[kK](?:_[smlSML])?)?|q[2-8]_[01]|"
+    r"iq[1-4](?:_[a-z]+)?|mxfp[48]|nvfp4)(?:$|[-_:])",
+    re.IGNORECASE,
+)
+_TAG_QUANT_ALIASES = {"fp16": "F16", "f16": "F16", "f32": "F32", "bf16": "BF16"}
+
+
+def normalize_quant(value, tag: str | None = "") -> str | None:
+    """Return a GGUF-style quant name, or None. Never emit the Ollama 'unknown' placeholder."""
+    if isinstance(value, int):
+        mapped = FILE_TYPE_NAMES.get(value)
+        if mapped:
+            return mapped
+    text = str(value or "").strip()
+    if text and text.casefold() not in _PLACEHOLDER_QUANTS:
+        canon = text.replace("-", "_").upper()
+        if canon in {"FP16", "FLOAT16"}:
+            return "F16"
+        if canon in {"FP32", "FLOAT32"}:
+            return "F32"
+        return canon
+    match = _TAG_QUANT.search(str(tag or ""))
+    if not match:
+        return None
+    raw = match.group(1).lower()
+    return _TAG_QUANT_ALIASES.get(raw, raw.upper())
 
 
 class NeedMoreBytes(Exception):
@@ -66,6 +108,10 @@ _SCALAR_FMT = {0: "B", 1: "b", 2: "H", 3: "h", 4: "I", 5: "i", 6: "f", 7: "?", 1
 _STRING, _ARRAY = 8, 9
 
 
+def _keep_full_array(key: str) -> bool:
+    return any(key.endswith(suffix) for suffix in KEEP_FULL_ARRAY_SUFFIXES)
+
+
 def _read_value(r: _Reader, t: int, summarize: bool):
     if t == _STRING:
         return r.rstr()
@@ -98,7 +144,8 @@ def parse_gguf(buf: bytes, summarize_arrays: bool = True) -> dict:
     for _ in range(n_kv):
         k = r.rstr()
         t = r.rd("I")
-        meta[k] = _read_value(r, t, summarize_arrays)
+        summarize = summarize_arrays and not _keep_full_array(k)
+        meta[k] = _read_value(r, t, summarize)
     tensors = []
     for _ in range(n_tensors):
         name = r.rstr()
@@ -187,7 +234,90 @@ def _scalar_or_list_max(v) -> int:
     return int(v)
 
 
+def _as_int_list(v, n_layer: int, default: int = 0) -> list[int] | None:
+    if isinstance(v, list) and v:
+        out = [int(x) for x in v]
+        if len(out) < n_layer:
+            out.extend([out[-1]] * (n_layer - len(out)))
+        return out[:n_layer]
+    if isinstance(v, dict):
+        return None
+    if v is None:
+        return None
+    return [int(v)] * n_layer
+
+
+def _as_bool_list(v, n_layer: int) -> list[bool] | None:
+    if not isinstance(v, list) or not v:
+        return None
+    out = [bool(x) for x in v]
+    if len(out) < n_layer:
+        out.extend([out[-1]] * (n_layer - len(out)))
+    return out[:n_layer]
+
+
+def kv_slopes_from_layers(
+    *,
+    n_layer: int,
+    n_kv: list[int],
+    key_length: int,
+    value_length: int,
+    key_length_swa: int = 0,
+    value_length_swa: int = 0,
+    sliding_window_pattern: list[bool] | None = None,
+    shared_kv_layers: int = 0,
+    bytes_per_elem: int = 2,
+) -> dict:
+    """Per-token f16 KV slopes for local vs global layers.
+
+    Shared tail layers alias a donor cache and do not allocate. Mixed
+    sliding_window_pattern (Gemma 4) splits head dim and context growth.
+    """
+    n_layer = int(n_layer or 0)
+    if n_layer <= 0 or not n_kv:
+        return {
+            "kv_local_bytes_per_token_f16": 0,
+            "kv_global_bytes_per_token_f16": 0,
+            "kv_bytes_per_token_f16": 0,
+            "kv_heads_sum": 0,
+            "n_swa_layers": 0,
+            "n_global_layers": 0,
+            "n_kv_alloc_layers": 0,
+        }
+    if len(n_kv) < n_layer:
+        n_kv = list(n_kv) + [n_kv[-1]] * (n_layer - len(n_kv))
+    shared = int(shared_kv_layers or 0)
+    n_alloc = n_layer - shared if 0 < shared < n_layer else n_layer
+    k_swa = int(key_length_swa or 0) or int(key_length)
+    v_swa = int(value_length_swa or 0) or int(value_length)
+    pattern = list(sliding_window_pattern) if sliding_window_pattern else None
+    n_swa = sum(1 for x in pattern if x) if pattern else 0
+    n_glo = (n_layer - n_swa) if pattern else 0
+    kv_local = kv_global = heads_sum = 0
+    for i in range(n_alloc):
+        heads = int(n_kv[i])
+        heads_sum += heads
+        is_local = bool(pattern[i]) if pattern else False
+        if pattern and is_local:
+            kv_local += heads * (k_swa + v_swa) * bytes_per_elem
+        else:
+            kv_global += heads * (int(key_length) + int(value_length)) * bytes_per_elem
+    if not pattern:
+        n_swa = n_glo = 0
+    return {
+        "kv_local_bytes_per_token_f16": int(kv_local),
+        "kv_global_bytes_per_token_f16": int(kv_global),
+        "kv_bytes_per_token_f16": int(kv_local + kv_global),
+        "kv_heads_sum": int(heads_sum),
+        "n_swa_layers": int(n_swa),
+        "n_global_layers": int(n_glo),
+        "n_kv_alloc_layers": int(n_alloc),
+    }
+
+
 def tensor_group(name: str) -> str:
+    if name.startswith("per_layer_token_embd"):
+        return "ple"  # huge lookup table; host RAM on E2B/E4B, not GPU-resident decode weights
     if name.startswith("token_embd"):
         return "token_embd"
     if name.startswith("v.") or name.startswith("mm.") or name.startswith("a."):
@@ -230,9 +360,37 @@ def summarize(parsed: dict, file_size: int) -> dict:
     n_head = _scalar_or_list_max(n_head_raw)
     n_head_kv = _scalar_or_list_max(n_head_kv_raw)
     kv_heads_sum = _scalar_or_list_sum(n_head_kv_raw, n_layer) or n_head_kv * n_layer
+    n_kv_list = _as_int_list(n_head_kv_raw, n_layer, n_head_kv) or [n_head_kv] * n_layer
     head_dim_default = (n_embd // n_head) if n_head else 0
     key_length = int(m("attention.key_length", head_dim_default) or head_dim_default)
     value_length = int(m("attention.value_length", head_dim_default) or head_dim_default)
+    key_length_swa = int(m("attention.key_length_swa", 0) or 0)
+    value_length_swa = int(m("attention.value_length_swa", 0) or 0)
+    sliding_window = int(m("attention.sliding_window", 0) or 0)
+    shared_kv_layers = int(m("attention.shared_kv_layers", 0) or 0)
+    pattern = _as_bool_list(m("attention.sliding_window_pattern"), n_layer)
+    slopes = kv_slopes_from_layers(
+        n_layer=n_layer,
+        n_kv=n_kv_list,
+        key_length=key_length,
+        value_length=value_length,
+        key_length_swa=key_length_swa,
+        value_length_swa=value_length_swa,
+        sliding_window_pattern=pattern,
+        shared_kv_layers=shared_kv_layers,
+    )
+    kv_heads_sum = slopes["kv_heads_sum"] or kv_heads_sum
+    kv_bytes_per_token_f16 = slopes["kv_bytes_per_token_f16"]
+    if not pattern:
+        # gemma3 / dense: one slope. Sliding window is applied at predict time.
+        kv_bytes_per_token_f16 = kv_heads_sum * (key_length + value_length) * 2
+        if sliding_window:
+            slopes["kv_local_bytes_per_token_f16"] = int(kv_bytes_per_token_f16)
+            slopes["kv_global_bytes_per_token_f16"] = 0
+        else:
+            slopes["kv_local_bytes_per_token_f16"] = 0
+            slopes["kv_global_bytes_per_token_f16"] = int(kv_bytes_per_token_f16)
+        slopes["kv_bytes_per_token_f16"] = int(kv_bytes_per_token_f16)
 
     vocab = m("vocab_size")
     if not vocab:
@@ -257,23 +415,25 @@ def summarize(parsed: dict, file_size: int) -> dict:
     expert_count = int(m("expert_count", 0) or 0)
     expert_used = int(m("expert_used_count", 0) or 0)
     expert_bytes = groups.get("ffn_expert", 0)
+    ple_bytes = groups.get("ple", 0)
+    gpu_weight = max(0, int(file_size) - int(ple_bytes))
+    gpu_tensor_count = sum(1 for t in tensors if tensor_group(t["name"]) not in ("ple", "vision"))
     if expert_count and expert_used and expert_bytes:
-        active_bytes = (file_size - expert_bytes) + expert_bytes * expert_used / expert_count
+        active_bytes = (gpu_weight - expert_bytes) + expert_bytes * expert_used / expert_count
     else:
-        active_bytes = file_size
-    # active params: scale expert params the same way
+        active_bytes = gpu_weight
     expert_params = sum(math.prod(t["dims"]) for t in tensors if tensor_group(t["name"]) == "ffn_expert")
+    ple_params = sum(math.prod(t["dims"]) for t in tensors if tensor_group(t["name"]) == "ple")
+    params_for_active = param_count - ple_params
     if expert_count and expert_used and expert_params:
-        active_params = (param_count - expert_params) + expert_params * expert_used / expert_count
+        active_params = (params_for_active - expert_params) + expert_params * expert_used / expert_count
     else:
-        active_params = param_count
-
-    kv_bytes_per_token_f16 = kv_heads_sum * (key_length + value_length) * 2
+        active_params = params_for_active
 
     return {
         "arch": arch,
         "name": meta.get("general.name"),
-        "file_type": meta.get("general.file_type"),
+        "file_type": normalize_quant(meta.get("general.file_type")),
         "size_label": meta.get("general.size_label"),
         "n_layer": n_layer,
         "n_embd": n_embd,
@@ -282,20 +442,33 @@ def summarize(parsed: dict, file_size: int) -> dict:
         "kv_heads_sum": kv_heads_sum,
         "key_length": key_length,
         "value_length": value_length,
+        "key_length_swa": key_length_swa,
+        "value_length_swa": value_length_swa,
         "context_length": int(m("context_length", 0) or 0),
         "vocab_size": int(vocab or 0),
         "expert_count": expert_count,
         "expert_used_count": expert_used,
-        "sliding_window": int(m("attention.sliding_window", 0) or 0),
+        "sliding_window": sliding_window,
+        "shared_kv_layers": shared_kv_layers,
+        "n_swa_layers": slopes["n_swa_layers"],
+        "n_global_layers": slopes["n_global_layers"],
+        "n_kv_alloc_layers": slopes["n_kv_alloc_layers"],
+        "embedding_length_per_layer_input": int(m("embedding_length_per_layer_input", 0) or 0),
         "param_count": int(param_count),
         "active_params": int(active_params),
+        "ple_params": int(ple_params),
         "tensor_count": len(tensors),
+        "gpu_tensor_count": int(gpu_tensor_count),
         "weight_bytes": int(file_size),
+        "gpu_weight_bytes": int(gpu_weight),
+        "ple_bytes": int(ple_bytes),
         "data_start": parsed["data_start"],
         "tensor_groups_bytes": groups,
         "expert_bytes": int(expert_bytes),
         "active_weight_bytes": int(active_bytes),
-        "kv_bytes_per_token_f16": int(kv_bytes_per_token_f16),
+        "kv_local_bytes_per_token_f16": int(slopes["kv_local_bytes_per_token_f16"]),
+        "kv_global_bytes_per_token_f16": int(slopes["kv_global_bytes_per_token_f16"]),
+        "kv_bytes_per_token_f16": int(slopes["kv_bytes_per_token_f16"]),
     }
 
 
@@ -342,10 +515,13 @@ def main(argv=None) -> int:
         print(json.dumps(s, indent=2))
     else:
         for k in ("arch", "name", "n_layer", "n_head", "n_head_kv", "key_length", "value_length",
-                  "context_length", "vocab_size", "expert_count", "expert_used_count", "sliding_window",
+                  "key_length_swa", "value_length_swa", "context_length", "vocab_size",
+                  "expert_count", "expert_used_count", "sliding_window", "shared_kv_layers",
+                  "n_swa_layers", "n_global_layers", "n_kv_alloc_layers",
                   "param_count", "active_params", "weight_bytes", "active_weight_bytes",
+                  "kv_local_bytes_per_token_f16", "kv_global_bytes_per_token_f16",
                   "kv_bytes_per_token_f16", "header_bytes", "bytes_fetched"):
-            print(f"{k:24s} {s[k]}")
+            print(f"{k:32s} {s[k]}")
         print("tensor_groups_bytes      " + json.dumps(s["tensor_groups_bytes"]))
     return 0
 

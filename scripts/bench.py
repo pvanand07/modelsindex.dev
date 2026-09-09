@@ -9,7 +9,7 @@ Writes one JSON line per record to --out:
   kind=speed  per (model, ctx, prompt_len): median decode/prefill tok/s, TTFT, clock/throttle
 
     python scripts/bench.py --tier local --ctx 2048,4096 --speed-ctx 4096 --prompt-tokens 128 --runs 1 --num-predict 64
-    python scripts/bench.py --tier 24gb --out /workspace/results/rtx4090.jsonl --server-log /workspace/results/server.log
+    python scripts/bench.py --tier 24gb --out /data/out/measurements/l4.jsonl --server-log /data/out/measurements/server.log
 
 Stdlib only; uses torch for the bandwidth test if importable.
 """
@@ -30,6 +30,9 @@ import urllib.error
 import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from progress import Bar, ProgressFile  # noqa: E402
 
 # --------------------------------------------------------------------------- model tiers
 SIZE_LADDER = ["llama3.2:1b", "llama3.2:3b", "llama3.1:8b"]
@@ -105,18 +108,18 @@ class ClockSampler(threading.Thread):
         super().__init__(daemon=True)
         self.interval = interval
         self.samples: list[dict] = []
-        self._stop = threading.Event()
+        self._stop_event = threading.Event()
 
     def run(self):
-        while not self._stop.is_set():
+        while not self._stop_event.is_set():
             s = nvsmi(NVSMI_FIELDS)
             if s:
                 s["t"] = time.time()
                 self.samples.append(s)
-            self._stop.wait(self.interval)
+            self._stop_event.wait(self.interval)
 
     def stop(self) -> list[dict]:
-        self._stop.set()
+        self._stop_event.set()
         self.join(timeout=5)
         return self.samples
 
@@ -184,36 +187,93 @@ def loaded_models() -> list[dict]:
 def unload_all(timeout: float = 90) -> None:
     for m in loaded_models():
         try:
-            api("POST", "/api/generate", {"model": m["name"], "keep_alive": 0}, timeout=120)
-        except urllib.error.HTTPError:
+            api("POST", "/api/generate", {"model": m["name"], "keep_alive": 0}, timeout=30)
+        except (urllib.error.HTTPError, urllib.error.URLError, TimeoutError):
             pass
     t0 = time.time()
     while loaded_models():
         if time.time() - t0 > timeout:
             raise RuntimeError("models still loaded after unload request")
-        time.sleep(0.5)
-    time.sleep(1.0)  # let the driver release memory
+        time.sleep(0.25)
+    time.sleep(0.25)
 
 
 def load_model(model: str, ctx: int) -> dict:
     return api("POST", "/api/generate", {
         "model": model, "prompt": "Hi", "stream": False, "keep_alive": "30m",
         "options": {"num_ctx": ctx, "num_predict": 1},
-    }, timeout=1800)
+    }, timeout=300)
 
 
 def generate(model: str, prompt: str, ctx: int, num_predict: int, seed: int) -> dict:
-    return api("POST", "/api/generate", {
-        "model": model, "prompt": prompt, "stream": False, "keep_alive": "30m",
+    """Stream the completion so a hung Ollama cannot sit silent for the full HTTP timeout."""
+    payload = {
+        "model": model, "prompt": prompt, "stream": True, "keep_alive": "30m",
         "options": {"num_ctx": ctx, "num_predict": num_predict, "temperature": 0, "seed": seed},
-    }, timeout=3600)
+    }
+    req = urllib.request.Request(
+        HOST + "/api/generate",
+        data=json.dumps(payload).encode(),
+        method="POST",
+        headers={"Content-Type": "application/json"},
+    )
+    last: dict = {}
+    with urllib.request.urlopen(req, timeout=60) as r:
+        while True:
+            line = r.readline()
+            if not line:
+                break
+            line = line.decode("utf-8", "replace").strip()
+            if not line:
+                continue
+            rec = json.loads(line)
+            last = rec
+            if rec.get("done"):
+                return rec
+    if last.get("done"):
+        return last
+    raise TimeoutError("generate stream ended without a done packet")
+
+
+def completed_models(paths: list[Path], skip_speed: bool) -> set[str]:
+    """Models that already have a model row, VRAM points, and (unless skip_speed) speed points."""
+    stats: dict[str, dict] = {}
+    for path in paths:
+        if not path.exists():
+            continue
+        for line in path.read_text(encoding="utf-8").splitlines():
+            if not line.strip():
+                continue
+            try:
+                rec = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            model = rec.get("model")
+            if not model:
+                continue
+            slot = stats.setdefault(model, {"model": False, "vram": 0, "speed": 0})
+            kind = rec.get("kind")
+            if kind == "model":
+                slot["model"] = True
+            elif kind == "vram":
+                slot["vram"] += 1
+            elif kind == "speed":
+                slot["speed"] += 1
+    return {
+        m for m, s in stats.items()
+        if s["model"] and s["vram"] >= 1 and (skip_speed or s["speed"] >= 1)
+    }
 
 
 def offload_line(server_log: str | None) -> dict | None:
     if not server_log or not os.path.exists(server_log):
         return None
     last = None
+    size = os.path.getsize(server_log)
     with open(server_log, encoding="utf-8", errors="replace") as f:
+        if size > 256 * 1024:
+            f.seek(size - 256 * 1024)
+            f.readline()
         for line in f:
             if "offloaded" in line and "layers" in line:
                 last = line.strip()
@@ -249,6 +309,9 @@ def main(argv=None) -> int:
     ap.add_argument("--server-log", help="path to the ollama serve log (offload lines)")
     ap.add_argument("--label", default="main")
     ap.add_argument("--out", default="data/out/measurements/local.jsonl")
+    ap.add_argument("--resume", action="store_true",
+                    help="skip models that already have vram+speed rows in --out or sibling *-{label}.jsonl")
+    ap.add_argument("--progress", help="atomic JSON progress file (default: <out-dir>/job_progress.json)")
     a = ap.parse_args(argv)
     HOST = a.host.rstrip("/")
 
@@ -261,7 +324,17 @@ def main(argv=None) -> int:
 
     out = Path(a.out)
     out.parent.mkdir(parents=True, exist_ok=True)
+    already: set[str] = set()
+    if a.resume:
+        siblings = [p for p in out.parent.glob(f"*-{a.label}.jsonl") if p.resolve() != out.resolve()]
+        already = completed_models([out, *siblings], skip_speed=a.skip_speed)
+        if already:
+            print(f"[resume] skipping {len(already)} complete models: {sorted(already)}", flush=True)
     fout = open(out, "a", encoding="utf-8")
+    prog = ProgressFile(a.progress or (out.parent / "job_progress.json"), job="bench")
+    prog.update(label=a.label, out=str(out), models_total=len(models), models_done=[],
+                models_remaining=len(models) - len(already), gpu=None)
+    prog.start()
 
     gpu_holder = {"name": None}
 
@@ -272,93 +345,18 @@ def main(argv=None) -> int:
         fout.write(json.dumps(rec) + "\n")
         fout.flush()
 
-    # ---- env
-    version = api("GET", "/api/version").get("version")
-    static = nvsmi(NVSMI_STATIC) or {}
-    gpu_name = static.get("name") or platform.processor() or "unknown"
-    gpu_holder["name"] = gpu_name
-    max_mem_clock = to_num(static.get("clocks.max.mem"))
-    env = {
-        "kind": "env", "host": socket.gethostname(), "platform": platform.platform(),
-        "ollama_version": version, "gpu": gpu_name, "nvidia": static,
-        "ollama_env": {k: v for k, v in os.environ.items() if k.startswith("OLLAMA_")},
-        "bw_measured_gbs": None if a.no_bandwidth else torch_bandwidth_gbs(),
-        "args": vars(a),
-    }
-    emit(env)
-    print(f"[env] ollama {version} on {gpu_name}; bw_measured={env['bw_measured_gbs']} GB/s")
-
-    tag_index = {m["name"]: m for m in api("GET", "/api/tags").get("models", [])}
-    seen_digests: set[str] = set()
-
-    for model in models:
-        print(f"\n=== {model} ===")
-        if not a.skip_pull:
-            t0 = time.time()
-            api("POST", "/api/pull", {"model": model, "stream": False}, timeout=7200)
-            print(f"[pull] {model} ready in {time.time() - t0:.0f}s")
-            tag_index = {m["name"]: m for m in api("GET", "/api/tags").get("models", [])}
-        entry = tag_index.get(model) or tag_index.get(model + ":latest") or {}
-        digest = entry.get("digest")
-        if digest and digest in seen_digests:
-            print(f"[skip] {model} shares digest {digest[:12]} with an earlier model")
-            continue
-        if digest:
-            seen_digests.add(digest)
-        try:
-            show = api("POST", "/api/show", {"model": model})
-        except urllib.error.HTTPError as e:
-            print(f"[skip] {model}: /api/show -> HTTP {e.code} (not pulled?)")
-            emit({"kind": "error", "model": model, "error": f"show HTTP {e.code}"})
-            continue
-        info = scalar_model_info(show.get("model_info", {}))
-        arch = info.get("general.architecture", "")
-        trained_ctx = int(info.get(f"{arch}.context_length", 0) or 0)
-        emit({"kind": "model", "model": model, "digest": digest, "size": entry.get("size"),
-              "details": show.get("details"), "model_info": info, "capabilities": show.get("capabilities"),
-              "trained_context_length": trained_ctx})
-
-        model_ctxs = [c for c in ctxs if not trained_ctx or c <= trained_ctx] or [min(ctxs)]
-
-        # ---- VRAM sweep
-        for ctx in model_ctxs:
-            unload_all()
-            base = nvsmi("memory.used")
-            base_used = to_num(base.get("memory.used")) if base else None
-            t0 = time.time()
-            r = load_model(model, ctx)
-            load_s = time.time() - t0
-            ps = next((m for m in loaded_models() if m["name"] in (model, model + ":latest")), None)
-            during = nvsmi("memory.used")
-            during_used = to_num(during.get("memory.used")) if during else None
-            rec = {
-                "kind": "vram", "model": model, "ctx": ctx, "gpu": gpu_name,
-                "ps_size": ps.get("size") if ps else None,
-                "ps_size_vram": ps.get("size_vram") if ps else None,
-                "ps_context_length": ps.get("context_length") if ps else None,
-                "fully_on_gpu": (ps is not None and ps.get("size_vram") == ps.get("size")),
-                "nvsmi_used_delta_mib": (during_used - base_used) if (during_used is not None and base_used is not None) else None,
-                "load_duration_ms": r.get("load_duration", 0) / 1e6,
-                "wall_load_s": round(load_s, 2),
-                "offload": offload_line(a.server_log),
-            }
-            emit(rec)
-            print(f"[vram] ctx={ctx:>6} size={rec['ps_size']} vram={rec['ps_size_vram']} "
-                  f"delta={rec['nvsmi_used_delta_mib']} MiB full={rec['fully_on_gpu']}")
-
-        # ---- speed sweep
-        if a.skip_speed:
-            continue
-        for ctx in [c for c in speed_ctxs if c in model_ctxs or (trained_ctx and c <= trained_ctx)]:
-            unload_all()
-            load_model(model, ctx)
-            for plen in prompt_lens:
-                if plen + a.num_predict + 64 > ctx:
-                    continue
-                sampler = ClockSampler()
-                sampler.start()
-                runs = []
+    def speed_at_ctx(model: str, ctx: int) -> None:
+        for plen in prompt_lens:
+            if plen + a.num_predict + 64 > ctx:
+                continue
+            prog.update(phase="speed", model=model, ctx=ctx, prompt=plen, emit_log=True)
+            sampler = ClockSampler()
+            sampler.start()
+            runs = []
+            try:
                 for i in range(a.runs + 1):  # first run is warm-up
+                    prog.update(phase="generate", model=model, ctx=ctx, prompt=plen, run=i,
+                                phase_t0=time.time(), emit_log=True)
                     nonce = f"{model}-{ctx}-{plen}-{i}-{time.time_ns()}"
                     r = generate(model, make_prompt(plen, nonce), ctx, a.num_predict, a.seed)
                     pe, ped = r.get("prompt_eval_count", 0), r.get("prompt_eval_duration", 0)
@@ -376,29 +374,149 @@ def main(argv=None) -> int:
                         "total_ms": round(r.get("total_duration", 0) / 1e6),
                         "load_ms": round(r.get("load_duration", 0) / 1e6),
                     })
-                samples = sampler.stop()
-                real = [x for x in runs if not x["warmup"] and x["decode_tps"]]
-                clocks = summarize_clocks(samples, max_mem_clock)
+            except (TimeoutError, urllib.error.URLError, urllib.error.HTTPError) as e:
+                sampler.stop()
+                emit({"kind": "error", "model": model, "ctx": ctx, "prompt_tokens_requested": plen,
+                      "error": f"generate: {type(e).__name__}: {e}"})
+                print(f"[skip] generate ctx={ctx} prompt={plen}: {e}", flush=True)
+                continue
+            samples = sampler.stop()
+            real = [x for x in runs if not x["warmup"] and x["decode_tps"]]
+            clocks = summarize_clocks(samples, max_mem_clock)
+            rec = {
+                "kind": "speed", "model": model, "ctx": ctx, "gpu": gpu_name,
+                "prompt_tokens_requested": plen, "num_predict": a.num_predict,
+                "prompt_eval_count": int(statistics.median(x["prompt_eval_count"] for x in real)) if real else None,
+                "eval_count": int(statistics.median(x["eval_count"] for x in real)) if real else None,
+                "decode_tps": round(statistics.median(x["decode_tps"] for x in real), 2) if real else None,
+                "prefill_tps": round(statistics.median(x["prefill_tps"] for x in real if x["prefill_tps"]), 2) if any(x["prefill_tps"] for x in real) else None,
+                "ttft_ms": round(statistics.median(x["ttft_ms"] for x in real if x["ttft_ms"] is not None), 2) if any(x.get("ttft_ms") is not None for x in real) else None,
+                "prompt_eval_ms": round(statistics.median(x["prompt_eval_ms"] for x in real if x.get("prompt_eval_ms") is not None), 2) if any(x.get("prompt_eval_ms") is not None for x in real) else None,
+                "runs": runs, "clocks": clocks, "flagged": clocks.get("flagged"),
+            }
+            emit(rec)
+            print(f"[speed] ctx={ctx:>6} prompt={rec['prompt_eval_count']:>5} "
+                  f"decode={rec['decode_tps']} t/s prefill={rec['prefill_tps']} t/s "
+                  f"ttft={rec['ttft_ms']} ms "
+                  f"memclk_ratio={clocks.get('mem_clock_ratio_to_max')} flagged={rec['flagged']}",
+                  flush=True)
+
+    # ---- env
+    version = api("GET", "/api/version").get("version")
+    static = nvsmi(NVSMI_STATIC) or {}
+    gpu_name = static.get("name") or platform.processor() or "unknown"
+    gpu_holder["name"] = gpu_name
+    max_mem_clock = to_num(static.get("clocks.max.mem"))
+    env = {
+        "kind": "env", "host": socket.gethostname(), "platform": platform.platform(),
+        "ollama_version": version, "gpu": gpu_name, "nvidia": static,
+        "ollama_env": {k: v for k, v in os.environ.items() if k.startswith("OLLAMA_")},
+        "bw_measured_gbs": None if a.no_bandwidth else torch_bandwidth_gbs(),
+        "args": vars(a),
+    }
+    emit(env)
+    print(f"[env] ollama {version} on {gpu_name}; bw_measured={env['bw_measured_gbs']} GB/s")
+    prog.update(gpu=gpu_name, bw_measured_gbs=env["bw_measured_gbs"], emit_log=True)
+
+    tag_index = {m["name"]: m for m in api("GET", "/api/tags").get("models", [])}
+    seen_digests: dict[str, str] = {}
+    remaining = [m for m in models if m not in already]
+    done_models = [m for m in models if m in already]
+    models_bar = Bar("bench models", len(models), done=len(models) - len(remaining))
+    prog.update(models_done=done_models, models_remaining=len(remaining), phase="models")
+
+    for model in remaining:
+        try:
+            print(f"\n=== {model} ===", flush=True)
+            prog.update(phase="model", model=model, ctx=None, prompt=None, emit_log=True)
+            if not a.skip_pull:
+                t0 = time.time()
+                api("POST", "/api/pull", {"model": model, "stream": False}, timeout=7200)
+                print(f"[pull] {model} ready in {time.time() - t0:.0f}s")
+                tag_index = {m["name"]: m for m in api("GET", "/api/tags").get("models", [])}
+            entry = tag_index.get(model) or tag_index.get(model + ":latest") or {}
+            digest = entry.get("digest")
+            if digest and digest in seen_digests:
+                print(
+                    f"[skip] {model} same ollama digest as {seen_digests[digest]} "
+                    f"(identical weights, {digest[:12]})",
+                    flush=True,
+                )
+                continue
+            if digest:
+                seen_digests[digest] = model
+            try:
+                show = api("POST", "/api/show", {"model": model})
+            except urllib.error.HTTPError as e:
+                print(f"[skip] {model}: /api/show -> HTTP {e.code} (not pulled?)")
+                emit({"kind": "error", "model": model, "error": f"show HTTP {e.code}"})
+                continue
+            info = scalar_model_info(show.get("model_info", {}))
+            arch = info.get("general.architecture", "")
+            trained_ctx = int(info.get(f"{arch}.context_length", 0) or 0)
+            emit({"kind": "model", "model": model, "digest": digest, "size": entry.get("size"),
+                  "details": show.get("details"), "model_info": info, "capabilities": show.get("capabilities"),
+                  "trained_context_length": trained_ctx})
+
+            model_ctxs = [c for c in ctxs if not trained_ctx or c <= trained_ctx] or [min(ctxs)]
+            speed_ok = {c for c in speed_ctxs if c in model_ctxs}
+            ran_speed: set[int] = set()
+
+            for ctx in model_ctxs:
+                unload_all()
+                base = nvsmi("memory.used")
+                base_used = to_num(base.get("memory.used")) if base else None
+                t0 = time.time()
+                try:
+                    prog.update(phase="load", model=model, ctx=ctx, emit_log=True)
+                    r = load_model(model, ctx)
+                except (TimeoutError, urllib.error.URLError, urllib.error.HTTPError) as e:
+                    emit({"kind": "error", "model": model, "ctx": ctx, "error": f"load: {type(e).__name__}: {e}"})
+                    print(f"[skip] load ctx={ctx}: {e}", flush=True)
+                    break
+                load_s = time.time() - t0
+                ps = next((m for m in loaded_models() if m["name"] in (model, model + ":latest")), None)
+                during = nvsmi("memory.used")
+                during_used = to_num(during.get("memory.used")) if during else None
                 rec = {
-                    "kind": "speed", "model": model, "ctx": ctx, "gpu": gpu_name,
-                    "prompt_tokens_requested": plen, "num_predict": a.num_predict,
-                    "prompt_eval_count": int(statistics.median(x["prompt_eval_count"] for x in real)) if real else None,
-                    "eval_count": int(statistics.median(x["eval_count"] for x in real)) if real else None,
-                    "decode_tps": round(statistics.median(x["decode_tps"] for x in real), 2) if real else None,
-                    "prefill_tps": round(statistics.median(x["prefill_tps"] for x in real if x["prefill_tps"]), 2) if any(x["prefill_tps"] for x in real) else None,
-                    "ttft_ms": round(statistics.median(x["ttft_ms"] for x in real if x["ttft_ms"] is not None), 2) if any(x.get("ttft_ms") is not None for x in real) else None,
-                    "prompt_eval_ms": round(statistics.median(x["prompt_eval_ms"] for x in real if x.get("prompt_eval_ms") is not None), 2) if any(x.get("prompt_eval_ms") is not None for x in real) else None,
-                    "runs": runs, "clocks": clocks, "flagged": clocks.get("flagged"),
+                    "kind": "vram", "model": model, "ctx": ctx, "gpu": gpu_name,
+                    "ps_size": ps.get("size") if ps else None,
+                    "ps_size_vram": ps.get("size_vram") if ps else None,
+                    "ps_context_length": ps.get("context_length") if ps else None,
+                    "fully_on_gpu": (ps is not None and ps.get("size_vram") == ps.get("size")),
+                    "nvsmi_used_delta_mib": (during_used - base_used) if (during_used is not None and base_used is not None) else None,
+                    "load_duration_ms": r.get("load_duration", 0) / 1e6,
+                    "wall_load_s": round(load_s, 2),
+                    "offload": offload_line(a.server_log),
                 }
                 emit(rec)
-                print(f"[speed] ctx={ctx:>6} prompt={rec['prompt_eval_count']:>5} "
-                      f"decode={rec['decode_tps']} t/s prefill={rec['prefill_tps']} t/s "
-                      f"ttft={rec['ttft_ms']} ms "
-                      f"memclk_ratio={clocks.get('mem_clock_ratio_to_max')} flagged={rec['flagged']}")
+                print(f"[vram] ctx={ctx:>6} size={rec['ps_size']} vram={rec['ps_size_vram']} "
+                      f"delta={rec['nvsmi_used_delta_mib']} MiB full={rec['fully_on_gpu']}")
+                prog.update(phase="vram", model=model, ctx=ctx, fully_on_gpu=rec["fully_on_gpu"])
+                if not a.skip_speed and ctx in speed_ok:
+                    speed_at_ctx(model, ctx)
+                    ran_speed.add(ctx)
+
+            if not a.skip_speed:
+                for ctx in speed_ok - ran_speed:
+                    unload_all()
+                    try:
+                        load_model(model, ctx)
+                    except (TimeoutError, urllib.error.URLError, urllib.error.HTTPError) as e:
+                        emit({"kind": "error", "model": model, "ctx": ctx, "error": f"load: {type(e).__name__}: {e}"})
+                        print(f"[skip] load ctx={ctx}: {e}", flush=True)
+                        continue
+                    speed_at_ctx(model, ctx)
+        finally:
+            done_models.append(model)
+            prog.update(models_done=done_models, models_remaining=max(0, len(models) - len(done_models)))
+            models_bar.update(item=model)
+    models_bar.finish()
 
     unload_all()
+    print(f"\n[done] wrote {out}", flush=True)
     fout.close()
-    print(f"\n[done] wrote {out}")
+    prog.close(status="done")
     return 0
 
 
