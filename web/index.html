@@ -3,12 +3,40 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta name="description" content="Find Ollama models that fit your GPU, context, and workload.">
-  <title>MODELINDEX — Find the right Ollama model</title>
+  <meta name="description" content="Find the best AI model your hardware can run. Compare Ollama-compatible models by VRAM, speed, and capability for your exact GPU, RAM, and context needs.">
+  <meta name="robots" content="index, follow">
+  <link rel="canonical" href="https://modelsindex.dev/">
+  <title>MODELINDEX — AI Model Compatibility Index</title>
+
+  <meta property="og:type" content="website">
+  <meta property="og:site_name" content="MODELINDEX">
+  <meta property="og:title" content="MODELINDEX — AI Model Compatibility Index">
+  <meta property="og:description" content="Find the best AI model your hardware can run. Compare Ollama-compatible models by VRAM, speed, and capability.">
+  <meta property="og:url" content="https://modelsindex.dev/">
+  <meta name="twitter:card" content="summary">
+  <meta name="twitter:title" content="MODELINDEX — AI Model Compatibility Index">
+  <meta name="twitter:description" content="Find the best AI model your hardware can run. Compare Ollama-compatible models by VRAM, speed, and capability.">
+
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
   <link rel="stylesheet" href="styles.css">
+  <script type="application/ld+json">
+  {
+    "@context": "https://schema.org",
+    "@type": "WebApplication",
+    "name": "MODELINDEX",
+    "url": "https://modelsindex.dev/",
+    "description": "Find the best AI model your hardware can run. Compare Ollama-compatible models by VRAM, speed, and capability.",
+    "applicationCategory": "UtilityApplication",
+    "operatingSystem": "Any",
+    "offers": {
+      "@type": "Offer",
+      "price": "0",
+      "priceCurrency": "USD"
+    }
+  }
+  </script>
 </head>
 <body>
   <header class="topbar">
@@ -17,13 +45,13 @@
       <span>MODELINDEX</span>
     </a>
     <p class="data-status" id="data-status">Loading catalog…</p>
-    <a class="method-link" href="../prod/data/README.md">Method &amp; data</a>
+    <a class="method-link" href="#method">Method &amp; data</a>
   </header>
 
   <main>
     <section class="hero">
-      <p class="hero-kicker">Ollama hardware compatibility index</p>
-      <h1>Find the biggest model your machine can run.</h1>
+      <p class="hero-kicker">AI model compatibility index</p>
+      <h1>Find the best model your machine can run.</h1>
       <p class="hero-copy">Choose your hardware and workload. We’ll rank compatible Ollama tags and show exactly why each one made the cut.</p>
     </section>
 
@@ -149,12 +177,13 @@
       </section>
     </section>
 
-    <section class="method-strip">
+    <section class="method-strip" id="method">
       <div><strong>Fit</strong><span>Full GPU, partial offload, or unavailable for your memory budget.</span></div>
       <div><strong>Speed</strong><span>Decode tokens per second from a hardware model; only L4 coefficients are measured.</span></div>
       <div><strong>Capability</strong><span>Intelligence from stored benches × quant when available; otherwise a size prior with exponential age decay (half-life 1.1y).</span></div>
       <div><strong>Task fit</strong><span>Use-case score from a task-specific bench mix (same shape as intelligence); size prior when that mix is missing.</span></div>
       <div><strong>VRAM</strong><span>Weights + projector + capped KV + graph memory at your selected context.</span></div>
+      <div><strong>Data</strong><span>Sourced from the Ollama library and model registries; rebuilt from <a href="https://github.com/pvanand07/modelsindex.dev/tree/main/prod/data" rel="noopener">prod/data on GitHub</a>.</span></div>
     </section>
   </main>
 
