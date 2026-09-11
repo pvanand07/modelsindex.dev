@@ -1,10 +1,12 @@
 {
-  "name": "modelindex-app",
+  "name": "modelsindex-dev",
   "private": true,
   "devDependencies": {
-    "wrangler": "^4"
+    "wrangler": "^4.131.0"
   },
   "scripts": {
-    "deploy": "wrangler pages deploy web --project-name modelindex-app"
+    "build": "bash scripts/build_dist.sh",
+    "deploy": "npm run build && wrangler deploy",
+    "preview": "npm run build && wrangler dev"
   }
 }
