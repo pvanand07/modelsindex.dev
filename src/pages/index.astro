@@ -1,3 +1,6 @@
+---
+export const prerender = true;
+---
 <!doctype html>
 <html lang="en">
 <head>
@@ -20,7 +23,7 @@
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
-  <link rel="stylesheet" href="styles.css">
+  <link rel="stylesheet" href="/styles.css">
   <script type="application/ld+json">
   {
     "@context": "https://schema.org",
@@ -193,7 +196,7 @@
   </footer>
 
   <noscript>This finder needs JavaScript to load and rank the model catalog.</noscript>
-  <script>window.MODELINDEX_DATA_BASE = window.MODELINDEX_DATA_BASE || "../prod/data";</script>
-  <script src="app.js"></script>
+  <script is:inline>window.MODELINDEX_DATA_BASE = "/data";</script>
+  <script is:inline src="/finder.js"></script>
 </body>
 </html>

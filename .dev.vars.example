@@ -1,0 +1,18 @@
+# Local-dev secrets for `wrangler dev` / `astro dev` (Cloudflare's
+# platformProxy reads this file automatically). Copy to .dev.vars
+# (gitignored) and fill in. In production these are set with
+# `wrangler secret put <NAME>`, never written to wrangler.jsonc.
+
+# Turnstile secret key, paired with PUBLIC_TURNSTILE_SITE_KEY in
+# .env.example. Server-side verification in src/lib/turnstile.ts is a
+# no-op pass-through while this is unset.
+TURNSTILE_SECRET_KEY=
+
+# Bearer token for POST /api/comments/admin/moderate (hide/unhide).
+# Only needed if that endpoint is going to be used.
+ADMIN_SECRET=
+
+# Server-side pepper mixed into the SHA-256 hash of submitters' IPs
+# before storage (src/lib/comments.ts hashIp). Any random string; the
+# raw IP is never stored.
+IP_HASH_PEPPER=

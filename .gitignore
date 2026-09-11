@@ -11,3 +11,5 @@ node_modules/
 !.dev.vars.example
 !.env.example
 dist/
+.astro/
+public/data/

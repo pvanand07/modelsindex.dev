@@ -13,5 +13,15 @@
       "pattern": "modelsindex.dev",
       "custom_domain": true
     }
+  ],
+  // TODO(Phase 7): database_id is a placeholder. Replace with the id
+  // returned by `wrangler d1 create modelindex-comments` (requires
+  // Cloudflare login, not available in this session) before deploying.
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "modelindex-comments",
+      "database_id": "00000000-0000-0000-0000-000000000000"
+    }
   ]
 }
