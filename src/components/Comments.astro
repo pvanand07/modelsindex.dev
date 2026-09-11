@@ -1,0 +1,23 @@
+---
+interface Props {
+  slug: string;
+}
+const { slug } = Astro.props;
+---
+<section class="comments" data-slug={slug}>
+  <h2>Comments</h2>
+  <ul class="comment-list" id="comment-list"></ul>
+  <p class="comment-empty" id="comment-empty" hidden>No comments yet — be the first.</p>
+  <form class="comment-form" id="comment-form">
+    <input type="text" name="author_name" placeholder="Name" maxlength="80" required>
+    <textarea name="body" placeholder="Say something…" maxlength="4000" required></textarea>
+    <button type="submit">Post comment</button>
+    <p class="comment-status" id="comment-status"></p>
+  </form>
+</section>
+<script>
+  import { initComments } from '../scripts/comments.js';
+
+  const root = document.querySelector('.comments');
+  if (root) initComments(root);
+</script>
