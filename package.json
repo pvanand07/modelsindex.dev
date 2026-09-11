@@ -1,0 +1,10 @@
+{
+  "name": "modelindex-app",
+  "private": true,
+  "devDependencies": {
+    "wrangler": "^4"
+  },
+  "scripts": {
+    "deploy": "wrangler pages deploy web --project-name modelindex-app"
+  }
+}
