@@ -1,11 +1,201 @@
 ---
 ---
+<!doctype html>
 <html lang="en">
-  <head>
-    <meta charset="utf-8" />
-    <title>MODELINDEX — scaffold</title>
-  </head>
-  <body>
-    <h1>scaffold</h1>
-  </body>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Find the best AI model your hardware can run. Compare Ollama-compatible models by VRAM, speed, and capability for your exact GPU, RAM, and context needs.">
+  <meta name="robots" content="index, follow">
+  <link rel="canonical" href="https://modelsindex.dev/">
+  <title>MODELINDEX — AI Model Compatibility Index</title>
+
+  <meta property="og:type" content="website">
+  <meta property="og:site_name" content="MODELINDEX">
+  <meta property="og:title" content="MODELINDEX — AI Model Compatibility Index">
+  <meta property="og:description" content="Find the best AI model your hardware can run. Compare Ollama-compatible models by VRAM, speed, and capability.">
+  <meta property="og:url" content="https://modelsindex.dev/">
+  <meta name="twitter:card" content="summary">
+  <meta name="twitter:title" content="MODELINDEX — AI Model Compatibility Index">
+  <meta name="twitter:description" content="Find the best AI model your hardware can run. Compare Ollama-compatible models by VRAM, speed, and capability.">
+
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/styles.css">
+  <script type="application/ld+json">
+  {
+    "@context": "https://schema.org",
+    "@type": "WebApplication",
+    "name": "MODELINDEX",
+    "url": "https://modelsindex.dev/",
+    "description": "Find the best AI model your hardware can run. Compare Ollama-compatible models by VRAM, speed, and capability.",
+    "applicationCategory": "UtilityApplication",
+    "operatingSystem": "Any",
+    "offers": {
+      "@type": "Offer",
+      "price": "0",
+      "priceCurrency": "USD"
+    }
+  }
+  </script>
+</head>
+<body>
+  <header class="topbar">
+    <a class="brand" href="./" aria-label="MODELINDEX home">
+      <span class="brand-mark" aria-hidden="true"><i></i><i></i><i></i></span>
+      <span>MODELINDEX</span>
+    </a>
+    <p class="data-status" id="data-status">Loading catalog…</p>
+    <a class="method-link" href="#method">Method &amp; data</a>
+  </header>
+
+  <main>
+    <section class="hero">
+      <p class="hero-kicker">AI model compatibility index</p>
+      <h1>Find the best model your machine can run.</h1>
+      <p class="hero-copy">Choose your hardware and workload. We’ll rank compatible Ollama tags and show exactly why each one made the cut.</p>
+    </section>
+
+    <nav class="mode-switch" aria-label="Finder mode">
+      <button type="button" data-mode="find" aria-selected="true">Find a model</button>
+      <button type="button" data-mode="explore" aria-selected="false">Explore all</button>
+    </nav>
+
+    <section class="workspace">
+      <aside class="setup-panel" aria-label="Your setup">
+        <div class="panel-heading">
+          <h2>Your setup</h2>
+          <button type="button" class="text-button" id="reset">Reset</button>
+        </div>
+
+        <label class="field field-wide">
+          <span>GPU or computer</span>
+          <select id="gpu"></select>
+        </label>
+
+        <div class="field-row">
+          <label class="field">
+            <span>System RAM</span>
+            <select id="ram">
+              <option value="8">8 GB</option>
+              <option value="16">16 GB</option>
+              <option value="32" selected>32 GB</option>
+              <option value="64">64 GB</option>
+              <option value="128">128 GB</option>
+              <option value="256">256 GB</option>
+            </select>
+          </label>
+          <label class="field">
+            <span>Context needed</span>
+            <select id="ctx"></select>
+          </label>
+        </div>
+
+        <fieldset class="choice-group" id="usecase-group">
+          <legend>What are you building?</legend>
+          <div class="choice-grid">
+            <button type="button" data-usecase="chat" aria-pressed="true"><b>Chat</b><span>Writing &amp; everyday help</span></button>
+            <button type="button" data-usecase="code" aria-pressed="false"><b>Code</b><span>Programming &amp; SQL</span></button>
+            <button type="button" data-usecase="long" aria-pressed="false"><b>Long docs</b><span>Large files &amp; retrieval</span></button>
+            <button type="button" data-usecase="vision" aria-pressed="false"><b>Vision</b><span>Images &amp; screenshots</span></button>
+            <button type="button" data-usecase="embedding" aria-pressed="false"><b>Embeddings</b><span>Search &amp; retrieval</span></button>
+          </div>
+        </fieldset>
+
+        <fieldset class="choice-group compact" id="priority-group">
+          <legend>Optimize for</legend>
+          <div class="segmented">
+            <button type="button" data-priority="balanced" aria-pressed="true">Balanced</button>
+            <button type="button" data-priority="quality" aria-pressed="false">Capability</button>
+            <button type="button" data-priority="speed" aria-pressed="false">Speed</button>
+          </div>
+        </fieldset>
+
+        <label class="check-row">
+          <input id="allow-partial" type="checkbox">
+          <span><b>Allow partial offload</b><small>Slower and less predictable; requires enough system RAM.</small></span>
+        </label>
+
+        <section class="budget" aria-labelledby="budget-title">
+          <div class="budget-head">
+            <h3 id="budget-title">Memory budget</h3>
+            <strong id="budget-value">—</strong>
+          </div>
+          <div class="budget-track" aria-hidden="true"><i id="budget-fill"></i></div>
+          <p id="budget-note">Choose a GPU to calculate usable memory.</p>
+        </section>
+      </aside>
+
+      <section class="results-panel" aria-live="polite" aria-busy="true">
+        <div class="results-head">
+          <div>
+            <p class="results-label" id="results-label">Recommendations</p>
+            <h2 id="results-title">Loading model catalog…</h2>
+          </div>
+          <label class="search" id="search-wrap" hidden>
+            <span class="vh">Search catalog</span>
+            <input id="q" type="search" placeholder="Search model, family, architecture…" autocomplete="off">
+          </label>
+        </div>
+
+        <div class="notice" id="calibration-note"></div>
+        <div class="catalog-toolbar">
+          <div class="explore-filters" id="explore-filters">
+            <label><span>Fit</span><select id="fit-filter">
+              <option value="runnable">Runnable</option>
+              <option value="full">Full GPU only</option>
+              <option value="partial">Partial offload</option>
+              <option value="all">All models</option>
+            </select></label>
+            <label><span>Architecture</span><select id="arch-filter"><option value="all">All architectures</option></select></label>
+            <label><span>Quant</span><select id="quant-filter"><option value="all">All quants</option></select></label>
+            <div class="size-filter" id="size-filter">
+              <span>Size</span>
+              <button type="button" id="size-toggle" aria-expanded="false" aria-haspopup="listbox" aria-controls="size-menu">
+                <strong id="size-summary">All sizes</strong>
+              </button>
+              <div class="size-menu" id="size-menu" hidden role="listbox" aria-multiselectable="true" aria-label="Parameter size classes"></div>
+            </div>
+            <label><span>Sort</span><select id="sort">
+              <option value="recommended">Recommended</option>
+              <option value="capability">Intelligence</option>
+              <option value="speed">Estimated speed</option>
+              <option value="vram">Lowest VRAM</option>
+              <option value="context">Longest context</option>
+              <option value="newest">Newest push</option>
+              <option value="name">Name</option>
+            </select></label>
+          </div>
+        </div>
+
+        <div class="result-list" id="results"></div>
+        <div class="empty" id="empty" hidden>
+          <h3>No compatible models found</h3>
+          <p>Try a smaller context, enable partial offload, or choose a GPU with more memory.</p>
+        </div>
+        <button type="button" class="load-more" id="load-more" hidden>Show more models</button>
+        <p class="result-count" id="result-count"></p>
+      </section>
+    </section>
+
+    <section class="method-strip" id="method">
+      <div><strong>Fit</strong><span>Full GPU, partial offload, or unavailable for your memory budget.</span></div>
+      <div><strong>Speed</strong><span>Decode tokens per second from a hardware model; only L4 coefficients are measured.</span></div>
+      <div><strong>Capability</strong><span>Intelligence from stored benches × quant when available; otherwise a size prior with exponential age decay (half-life 1.1y).</span></div>
+      <div><strong>Task fit</strong><span>Use-case score from a task-specific bench mix (same shape as intelligence); size prior when that mix is missing.</span></div>
+      <div><strong>VRAM</strong><span>Weights + projector + capped KV + graph memory at your selected context.</span></div>
+      <div><strong>Data</strong><span>Sourced from the Ollama library and model registries; rebuilt from <a href="https://github.com/pvanand07/modelsindex.dev/tree/main/prod/data" rel="noopener">prod/data on GitHub</a>.</span></div>
+    </section>
+  </main>
+
+  <footer>
+    <p>MODELINDEX is a compatibility guide. Estimates cannot account for drivers, thermals, runtime settings, or workload-specific quality.</p>
+    <p id="footer-meta"></p>
+  </footer>
+
+  <noscript>This finder needs JavaScript to load and rank the model catalog.</noscript>
+  <script is:inline>window.MODELINDEX_DATA_BASE = "/data";</script>
+  <script is:inline src="/finder.js"></script>
+</body>
 </html>
