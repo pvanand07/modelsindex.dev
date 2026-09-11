@@ -12,3 +12,4 @@ node_modules/
 !.env.example
 dist/
 .astro/
+public/data/
