@@ -1,0 +1,59 @@
+---
+export const prerender = true;
+
+import { getCollection } from 'astro:content';
+
+const allPosts = await getCollection('blog', ({ data }) => import.meta.env.PROD ? !data.draft : true);
+const posts = allPosts.sort((a, b) => b.data.pubDate.valueOf() - a.data.pubDate.valueOf());
+---
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Methodology notes, model family deep dives, and updates from MODELINDEX.">
+  <meta name="robots" content="index, follow">
+  <link rel="canonical" href="https://modelsindex.dev/blog/">
+  <title>Blog — MODELINDEX</title>
+
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+  <header class="topbar">
+    <a class="brand" href="/" aria-label="MODELINDEX home">
+      <span class="brand-mark" aria-hidden="true"><i></i><i></i><i></i></span>
+      <span>MODELINDEX</span>
+    </a>
+    <a class="method-link" href="/">Finder</a>
+  </header>
+
+  <main>
+    <section class="blog-index-head">
+      <h1>Blog</h1>
+    </section>
+
+    {posts.length === 0 ? (
+      <p class="blog-empty">No posts yet.</p>
+    ) : (
+      <ul class="blog-list">
+        {posts.map((post) => (
+          <li>
+            <a href={`/blog/${post.id}/`}>{post.data.title}</a>
+            <p class="blog-list-meta">
+              {post.data.pubDate.toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric' })}
+            </p>
+            <p class="blog-list-desc">{post.data.description}</p>
+          </li>
+        ))}
+      </ul>
+    )}
+  </main>
+
+  <footer>
+    <p>MODELINDEX is a compatibility guide. Estimates cannot account for drivers, thermals, runtime settings, or workload-specific quality.</p>
+  </footer>
+</body>
+</html>

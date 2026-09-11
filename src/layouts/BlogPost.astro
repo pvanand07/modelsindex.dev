@@ -1,0 +1,67 @@
+---
+interface Props {
+  title: string;
+  description: string;
+  pubDate: Date;
+  updatedDate?: Date;
+  author: string;
+  slug: string;
+}
+
+const { title, description, pubDate, updatedDate, author, slug } = Astro.props;
+const url = `https://modelsindex.dev/blog/${slug}/`;
+const dateLabel = pubDate.toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric' });
+---
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content={description}>
+  <meta name="robots" content="index, follow">
+  <link rel="canonical" href={url}>
+  <title>{title} — MODELINDEX</title>
+
+  <meta property="og:type" content="article">
+  <meta property="og:site_name" content="MODELINDEX">
+  <meta property="og:title" content={title}>
+  <meta property="og:description" content={description}>
+  <meta property="og:url" content={url}>
+  <meta name="twitter:card" content="summary">
+  <meta name="twitter:title" content={title}>
+  <meta name="twitter:description" content={description}>
+
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+  <header class="topbar">
+    <a class="brand" href="/" aria-label="MODELINDEX home">
+      <span class="brand-mark" aria-hidden="true"><i></i><i></i><i></i></span>
+      <span>MODELINDEX</span>
+    </a>
+    <a class="method-link" href="/blog/">All posts</a>
+  </header>
+
+  <main class="blog-post">
+    <article>
+      <header class="blog-post-head">
+        <h1>{title}</h1>
+        <p class="blog-post-meta">
+          By {author} · <time datetime={pubDate.toISOString()}>{dateLabel}</time>
+          {updatedDate && <> · updated <time datetime={updatedDate.toISOString()}>{updatedDate.toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric' })}</time></>}
+        </p>
+      </header>
+      <div class="blog-post-body">
+        <slot />
+      </div>
+    </article>
+  </main>
+
+  <footer>
+    <p>MODELINDEX is a compatibility guide. Estimates cannot account for drivers, thermals, runtime settings, or workload-specific quality.</p>
+  </footer>
+</body>
+</html>
