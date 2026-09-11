@@ -3,6 +3,7 @@ interface Props {
   slug: string;
 }
 const { slug } = Astro.props;
+const turnstileSiteKey = import.meta.env.PUBLIC_TURNSTILE_SITE_KEY as string | undefined;
 ---
 <section class="comments" data-slug={slug}>
   <h2>Comments</h2>
@@ -11,10 +12,12 @@ const { slug } = Astro.props;
   <form class="comment-form" id="comment-form">
     <input type="text" name="author_name" placeholder="Name" maxlength="80" required>
     <textarea name="body" placeholder="Say something…" maxlength="4000" required></textarea>
+    {turnstileSiteKey && <div class="cf-turnstile" data-sitekey={turnstileSiteKey}></div>}
     <button type="submit">Post comment</button>
     <p class="comment-status" id="comment-status"></p>
   </form>
 </section>
+{turnstileSiteKey && <script src="https://challenges.cloudflare.com/turnstile/v0/api.js" async defer></script>}
 <script>
   import { initComments } from '../scripts/comments.js';
 

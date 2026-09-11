@@ -78,11 +78,14 @@ export function initComments(root) {
       return;
     }
 
+    const turnstileInput = form.querySelector('[name="cf-turnstile-response"]');
+    const turnstileToken = turnstileInput ? turnstileInput.value : undefined;
+
     try {
       const res = await fetch('/api/comments/submit', {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ entity_slug: slug, author_name: authorName, body: bodyText }),
+        body: JSON.stringify({ entity_slug: slug, author_name: authorName, body: bodyText, turnstileToken }),
       });
       if (!res.ok) throw new Error('submit failed');
       form.reset();
@@ -94,6 +97,7 @@ export function initComments(root) {
       status.dataset.state = 'error';
     } finally {
       submitBtn.disabled = false;
+      if (window.turnstile) window.turnstile.reset();
     }
   });
 
