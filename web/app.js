@@ -687,6 +687,8 @@ function sourceIconHtml(kind, href, label, verified) {
 // checkpoints entirely), so a release-specific pick is preferred whenever one exists; the
 // family-wide guess is kept as a fallback, not silently dropped, but flagged as such.
 function resolvedHf(row) {
+  const identity = row.identity_v2 && row.identity_v2.upstream;
+  if (identity && identity.url) return { ...identity, isIdentityV2: true };
   const hf = (row.links || {}).hf;
   if (!hf) return null;
   const link = hf.release || hf.family;
@@ -702,7 +704,9 @@ function sourceConfidenceHint(key, link) {
       : link.method === "homepage_llm" ? "found via the model's homepage"
       : "linked from the Ollama readme";
   }
-  const base = link.confidence === "verified" ? "byte-identical file match"
+  const base = link.confidence === "semantic_verified" ? "model card and release evidence confirm this upstream repository"
+    : link.confidence === "provisional" ? "release-name match from the identity resolver, not semantically verified"
+    : link.confidence === "verified" ? "byte-identical file match"
     : link.method === "github_llm" ? "found via the model's GitHub repo, not hash-verified"
     : link.method === "homepage_llm" ? "found via the model's homepage, not hash-verified"
     : link.method === "brave_search_verified" ? "found via web search, LLM-confirmed but not hash-verified"
@@ -719,7 +723,7 @@ function sourceIconsHtml(row) {
     const key = kind === "huggingface" ? "hf" : kind;
     const link = key === "hf" ? resolvedHf(row) : links[key];
     if (!link || !link.url) continue;
-    const verified = link.confidence === "verified";
+    const verified = link.confidence === "verified" || link.confidence === "semantic_verified";
     const label = `${SOURCE_LABELS[kind](link)} (${sourceConfidenceHint(key, link)})`;
     items.push(sourceIconHtml(kind, link.url, label, verified));
   }
@@ -734,7 +738,7 @@ function sourceLinksHtml(row) {
     const link = key === "hf" ? resolvedHf(row) : links[key];
     if (!link || !link.url) continue;
     const hint = sourceConfidenceHint(key, link);
-    const unverified = key === "hf" && link.confidence !== "verified";
+    const unverified = key === "hf" && !["verified", "semantic_verified"].includes(link.confidence);
     parts.push(`<a href="${esc(link.url)}" target="_blank" rel="noopener noreferrer" title="${esc(hint)}">${labels[key]}${unverified ? " (unverified)" : ""} ↗</a>`);
   }
   return `<p class="library-link">${parts.join(" · ")}</p>`;

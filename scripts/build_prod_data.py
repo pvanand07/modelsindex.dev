@@ -11,10 +11,24 @@ import argparse
 import json
 from collections import defaultdict
 from pathlib import Path
+import re
+import sys
+
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
 
 from build_index import gpu_constants
 from gguf_header import normalize_quant
-from link_common import QUANT_SUFFIX, release_key
+QUANT_SUFFIX = re.compile(
+    r"(?:^|[-_:])(?:f16|fp16|bf16|fp32|f32|fp8|q\d(?:_[a-z0-9]+){0,2}|iq\d(?:_[a-z0-9]+){0,2}|mxfp\d|nvfp\d)$",
+    re.I,
+)
+
+
+def release_key(family: str, tag: str) -> str:
+    """Return a stable release key without a trailing quantization token."""
+    return family + ":" + (QUANT_SUFFIX.sub("", tag) or "default")
 
 SCHEMA_VERSION = 2
 CODE_HINTS = (
@@ -186,7 +200,7 @@ def compact_library(library: dict | None, model_names: set[str]) -> dict:
 
 
 def load_link_content(link_content_dir: Path) -> dict[str, dict]:
-    """data/link_content/<family>.json, one file per family (scripts/links.py), loaded into a
+    """data/identity/evidence/link_content/<family>.json, one file per family, loaded into a
     single {family: {"hf"|"github"|"homepage": {"url","content"}}} dict.
     """
     out: dict[str, dict] = {}
@@ -364,9 +378,11 @@ def main(argv=None) -> int:
     parser.add_argument("--library", default="data/out/library.json")
     parser.add_argument("--scores", default="data/quality/scores.json")
     parser.add_argument("--q-base", default="data/quality/q_base.json")
-    parser.add_argument("--hf-sources", default="data/out/hf_sources.json")
-    parser.add_argument("--links", default="data/out/links.json")
-    parser.add_argument("--link-content", default="data/link_content")
+    parser.add_argument("--hf-sources", help="deprecated legacy hf_sources.json compatibility input")
+    parser.add_argument("--links", help="deprecated legacy links.json compatibility input")
+    parser.add_argument("--link-content", default="data/identity/evidence/link_content")
+    parser.add_argument("--identity", help="optional identity_v2 report; attaches only semantic-verified upstreams by default")
+    parser.add_argument("--identity-include-provisional", action="store_true")
     parser.add_argument("--out-dir", default="prod/data")
     args = parser.parse_args(argv)
 
@@ -381,14 +397,25 @@ def main(argv=None) -> int:
     scores = load_json(scores_path) if scores_path.exists() else None
     q_base_path = Path(args.q_base)
     q_base = load_json(q_base_path) if q_base_path.exists() else None
-    hf_sources_path = Path(args.hf_sources)
-    hf_sources = load_json(hf_sources_path) if hf_sources_path.exists() else None
-    links_path = Path(args.links)
-    links = load_json(links_path) if links_path.exists() else None
+    hf_sources_path = Path(args.hf_sources) if args.hf_sources else None
+    hf_sources = load_json(hf_sources_path) if hf_sources_path and hf_sources_path.exists() else None
+    links_path = Path(args.links) if args.links else None
+    links = load_json(links_path) if links_path and links_path.exists() else None
     link_content = load_link_content(Path(args.link_content))
     manifest, hardware, catalog, library_out, quality, link_content_out = build(
         index, constants, library, scores, q_base, hf_sources, links, link_content,
     )
+    if args.identity:
+        from identity.export import export as export_identity
+        identity = load_json(Path(args.identity))
+        attached = export_identity(identity, catalog, args.identity_include_provisional)
+        catalog = {"schema_version": catalog.get("schema_version"), "models": attached["models"]}
+        manifest["identity_v2"] = {
+            "resolver_version": attached["identity_resolver_version"],
+            "evidence_snapshot": attached["identity_evidence_snapshot"],
+            "include_provisional": attached["include_provisional"],
+            "summary": attached["summary"],
+        }
     write_json(out_dir / "manifest.json", manifest)
     write_json(out_dir / "gpus.json", hardware)
     write_json(out_dir / "models.json", catalog)
