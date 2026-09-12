@@ -3,3 +3,4 @@ data/out/
 __pycache__/
 *.pyc
 .env
+/legacy/
